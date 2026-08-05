@@ -2,7 +2,7 @@
 
 ## Current Status
 
-要件定義と基本設計のみ完了。実装は未着手。
+Phase 1のプロジェクト基盤を完了。次はPhase 2のOpenSSH capability probeに着手する。
 
 MVPは、Linux上でシステムOpenSSHのControlMasterを管理し、TUIから `-L` ローカルポートフォワードを追加・削除できる状態を指す。
 
@@ -41,7 +41,7 @@ MVPは、Linux上でシステムOpenSSHのControlMasterを管理し、TUIから 
 - [x] Rustプロジェクトを初期化する。
 - [x] formatter、lint、testの基本コマンドを決める。
 - [x] `domain`、`ssh`、`config`、`runtime`、`tui` のモジュール境界を作る。
-- [ ] 構造化ログとエラー型の最小構成を作る。
+- [x] 構造化ログとエラー型の最小構成を作る。
 - [x] CIでformat、lint、unit testを実行する。
 
 ### Exit Criteria

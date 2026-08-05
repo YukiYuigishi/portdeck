@@ -716,6 +716,8 @@ struct ForwardRow {
     state: ForwardState,
     local: String,
     remote: String,
+    local_port: u16,
+    remote_port: u16,
 }
 
 /// Renders the complete current application state.
@@ -829,14 +831,25 @@ fn render_forwards<B: SshClient, P: PortProbe>(
     let items = rows
         .iter()
         .map(|row| {
-            ListItem::new(format!(
-                "{} {}  {} → {}  {}",
-                forward_symbol(row.state),
-                row.label,
-                row.local,
-                row.remote,
-                forward_label(row.state)
-            ))
+            if area.width < 60 {
+                ListItem::new(format!(
+                    "{} {}→{} {} {}",
+                    forward_symbol(row.state),
+                    row.local_port,
+                    row.remote_port,
+                    row.label,
+                    forward_label(row.state)
+                ))
+            } else {
+                ListItem::new(format!(
+                    "{} {}  {} → {}  {}",
+                    forward_symbol(row.state),
+                    row.label,
+                    row.local,
+                    row.remote,
+                    forward_label(row.state)
+                ))
+            }
         })
         .collect::<Vec<_>>();
     let border_style = focus_border(ui.focus == Focus::Forwards);
@@ -878,6 +891,8 @@ fn forward_rows<B: SshClient, P: PortProbe>(ui: &UiState, app: &AppState<B, P>) 
                 state,
                 local: display_endpoint(&rule.bind_address, local_port),
                 remote: display_endpoint(&rule.remote_host, rule.remote_port),
+                local_port,
+                remote_port: rule.remote_port,
             }
         })
         .collect()
@@ -1261,6 +1276,25 @@ mod tests {
             "│q: quit           │",
             "└──────────────────┘",
         ]);
+    }
+
+    #[test]
+    fn narrow_terminal_keeps_both_forward_port_numbers_visible() {
+        let fixture = Fixture::new();
+        let mut terminal = Terminal::new(TestBackend::new(50, 10)).unwrap();
+
+        terminal
+            .draw(|frame| render(frame, &UiState::default(), &fixture.app))
+            .unwrap();
+
+        let contents = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect::<String>();
+        assert!(contents.contains("8080→3000"));
     }
 
     #[test]

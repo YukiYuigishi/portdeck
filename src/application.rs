@@ -726,6 +726,18 @@ impl<B: SshClient, P: PortProbe> SessionManager<B, P> {
                 runtime_forward.activate(candidate, spec.as_argument())?;
                 return Ok(candidate);
             }
+            if output_indicates_controlmaster_unavailable(&output) {
+                let failure = Failure::new(
+                    FailureKind::ControlMasterUnavailable,
+                    "転送追加中にControlMasterが切断されました",
+                    output.diagnostic().map(str::to_owned),
+                );
+                runtime_forward.transition(ForwardState::Unavailable)?;
+                move_session_to_disconnected(&mut entry.session)?;
+                entry.session.last_error = Some(failure.clone());
+                mark_forwards_unavailable(entry)?;
+                return Err(ManagerError::Operation(failure));
+            }
             if output_indicates_port_conflict(&output) {
                 last_conflict_detail = output.diagnostic().map(str::to_owned);
                 continue;
@@ -800,6 +812,18 @@ impl<B: SshClient, P: PortProbe> SessionManager<B, P> {
             }
         };
         if !output.success {
+            if output_indicates_controlmaster_unavailable(&output) {
+                let failure = Failure::new(
+                    FailureKind::ControlMasterUnavailable,
+                    "転送取消中にControlMasterが切断されました",
+                    output.diagnostic().map(str::to_owned),
+                );
+                runtime_forward.transition(ForwardState::Unavailable)?;
+                move_session_to_disconnected(&mut entry.session)?;
+                entry.session.last_error = Some(failure.clone());
+                mark_forwards_unavailable(entry)?;
+                return Err(ManagerError::Operation(failure));
+            }
             let failure = Failure::new(
                 FailureKind::CancelFailed,
                 "転送の取消に失敗しました",
@@ -966,6 +990,18 @@ fn output_indicates_port_conflict(output: &SshOutput) -> bool {
         "cannot listen to port",
         "could not request local forwarding",
         "port forwarding failed",
+    ]
+    .iter()
+    .any(|pattern| diagnostic.contains(pattern))
+}
+
+fn output_indicates_controlmaster_unavailable(output: &SshOutput) -> bool {
+    let diagnostic = output.diagnostic().unwrap_or_default().to_ascii_lowercase();
+    [
+        "control socket connect",
+        "master is not running",
+        "no such file or directory",
+        "connection refused",
     ]
     .iter()
     .any(|pattern| diagnostic.contains(pattern))
@@ -1361,6 +1397,32 @@ mod tests {
     }
 
     #[test]
+    fn lost_controlmaster_during_add_updates_session_and_forward_together() {
+        let test_runtime = TestRuntime::new();
+        let mut ssh = FakeSsh::successful();
+        ssh.forward
+            .get_mut()
+            .push_back(failure("Control socket connect: No such file or directory"));
+        let mut manager = SessionManager::with_port_probe(
+            ssh,
+            test_runtime.runtime(),
+            vec![target()],
+            FakePortProbe::default(),
+        )
+        .unwrap();
+        manager.connect(&TargetId::new("dev")).unwrap();
+
+        manager.activate_forward(&rule()).unwrap_err();
+
+        let entry = manager.entry(&TargetId::new("dev")).unwrap();
+        assert_eq!(entry.session.state, SessionState::Disconnected);
+        assert_eq!(
+            entry.forwards[&ForwardRuleId::new("web")].state,
+            ForwardState::Unavailable
+        );
+    }
+
+    #[test]
     fn cancel_failure_keeps_exact_runtime_values_visible() {
         let test_runtime = TestRuntime::new();
         let mut ssh = FakeSsh::successful();
@@ -1410,6 +1472,34 @@ mod tests {
             manager.entry(&TargetId::new("dev")).unwrap().forwards[&ForwardRuleId::new("web")]
                 .state,
             ForwardState::Inactive
+        );
+    }
+
+    #[test]
+    fn lost_controlmaster_during_cancel_marks_all_runtime_state_unavailable() {
+        let test_runtime = TestRuntime::new();
+        let mut ssh = FakeSsh::successful();
+        ssh.forward.get_mut().push_back(success());
+        ssh.cancel
+            .get_mut()
+            .push_back(failure("master is not running"));
+        let mut manager = SessionManager::with_port_probe(
+            ssh,
+            test_runtime.runtime(),
+            vec![target()],
+            FakePortProbe::default(),
+        )
+        .unwrap();
+        manager.connect(&TargetId::new("dev")).unwrap();
+        manager.activate_forward(&rule()).unwrap();
+
+        manager.cancel_forward(&rule()).unwrap_err();
+
+        let entry = manager.entry(&TargetId::new("dev")).unwrap();
+        assert_eq!(entry.session.state, SessionState::Disconnected);
+        assert_eq!(
+            entry.forwards[&ForwardRuleId::new("web")].state,
+            ForwardState::Unavailable
         );
     }
 

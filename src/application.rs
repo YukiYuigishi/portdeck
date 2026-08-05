@@ -6,6 +6,7 @@ use std::net::TcpListener;
 
 use thiserror::Error;
 
+use crate::config::{RuleStore, StoreError};
 use crate::domain::{
     ActiveForward, Failure, FailureKind, ForwardRule, ForwardRuleId, ForwardState, Session,
     SessionState, Target, TargetId, TransitionError,
@@ -83,6 +84,7 @@ pub struct AppState<B, P = SystemPortProbe> {
     sessions: SessionManager<B, P>,
     rules: BTreeMap<TargetId, Vec<ForwardRule>>,
     next_rule_number: u64,
+    rule_store: Option<RuleStore>,
 }
 
 impl<B: SshClient, P: PortProbe> AppState<B, P> {
@@ -112,7 +114,19 @@ impl<B: SshClient, P: PortProbe> AppState<B, P> {
             sessions,
             rules: grouped_rules,
             next_rule_number: 1,
+            rule_store: None,
         })
+    }
+
+    /// Creates application state that persists every definition mutation.
+    pub fn with_store(
+        sessions: SessionManager<B, P>,
+        rules: Vec<ForwardRule>,
+        rule_store: RuleStore,
+    ) -> Result<Self, RuleError> {
+        let mut state = Self::new(sessions, rules)?;
+        state.rule_store = Some(rule_store);
+        Ok(state)
     }
 
     /// Session manager used for connection-level operations.
@@ -144,9 +158,9 @@ impl<B: SshClient, P: PortProbe> AppState<B, P> {
         &mut self,
         target_id: &TargetId,
         draft: ForwardRuleDraft,
-    ) -> Result<ForwardRuleId, RuleError> {
+    ) -> Result<ForwardRuleId, AppActionError> {
         if self.sessions.entry(target_id).is_none() {
-            return Err(RuleError::UnknownTarget(target_id.clone()));
+            return Err(RuleError::UnknownTarget(target_id.clone()).into());
         }
         let id = self.next_rule_id();
         let rule = ForwardRule {
@@ -159,6 +173,14 @@ impl<B: SshClient, P: PortProbe> AppState<B, P> {
             remote_port: draft.remote_port,
         };
         self.rules.entry(target_id.clone()).or_default().push(rule);
+        if let Err(error) = self.persist_rules() {
+            if let Some(rules) = self.rules.get_mut(target_id)
+                && let Some(index) = rules.iter().position(|rule| rule.id == id)
+            {
+                rules.remove(index);
+            }
+            return Err(error.into());
+        }
         Ok(id)
     }
 
@@ -192,15 +214,29 @@ impl<B: SshClient, P: PortProbe> AppState<B, P> {
             )));
         }
 
-        for rules in self.rules.values_mut() {
-            if let Some(index) = rules.iter().position(|rule| &rule.id == rule_id) {
-                rules.remove(index);
-                return Ok(());
-            }
+        let Some((target_id, index)) = self.rules.iter().find_map(|(target_id, rules)| {
+            rules
+                .iter()
+                .position(|rule| &rule.id == rule_id)
+                .map(|index| (target_id.clone(), index))
+        }) else {
+            return Err(AppActionError::Rule(RuleError::UnknownRule(
+                rule_id.clone(),
+            )));
+        };
+        let removed = self
+            .rules
+            .get_mut(&target_id)
+            .expect("target was found")
+            .remove(index);
+        if let Err(error) = self.persist_rules() {
+            self.rules
+                .get_mut(&target_id)
+                .expect("target was found")
+                .insert(index, removed);
+            return Err(error.into());
         }
-        Err(AppActionError::Rule(RuleError::UnknownRule(
-            rule_id.clone(),
-        )))
+        Ok(())
     }
 
     fn find_rule(&self, rule_id: &ForwardRuleId) -> Result<&ForwardRule, AppActionError> {
@@ -219,6 +255,25 @@ impl<B: SshClient, P: PortProbe> AppState<B, P> {
                 return id;
             }
         }
+    }
+
+    fn persist_rules(&mut self) -> Result<(), StoreError> {
+        let Self {
+            sessions,
+            rules,
+            rule_store,
+            ..
+        } = self;
+        let Some(rule_store) = rule_store else {
+            return Ok(());
+        };
+        let targets = sessions
+            .entries()
+            .iter()
+            .map(|entry| entry.target.clone())
+            .collect::<Vec<_>>();
+        let rule_references = rules.values().flatten().collect::<Vec<_>>();
+        rule_store.save(&targets, &rule_references)
     }
 }
 
@@ -260,6 +315,9 @@ pub enum AppActionError {
     /// Saved-rule operation failed.
     #[error(transparent)]
     Rule(#[from] RuleError),
+    /// Atomic persistent configuration update failed.
+    #[error(transparent)]
+    Store(#[from] StoreError),
 }
 
 fn parse_port(value: &str, field: &'static str) -> Result<u16, RuleError> {
@@ -954,6 +1012,7 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    use crate::config::RuleStore;
     use crate::domain::{
         FailureKind, ForwardRule, ForwardRuleId, ForwardState, SessionState, Target, TargetId,
     };
@@ -1446,6 +1505,64 @@ mod tests {
         assert!(app.remove_rule(&rule_id).is_err());
         app.cancel_rule(&rule_id).unwrap();
         app.remove_rule(&rule_id).unwrap();
+        assert!(app.rules_for(&TargetId::new("dev")).is_empty());
+    }
+
+    #[test]
+    fn definition_changes_are_persisted_immediately_when_store_is_attached() {
+        let test_runtime = TestRuntime::new();
+        let config_path = test_runtime.0.join("config/portdeck.toml");
+        let ssh = FakeSsh::successful();
+        let manager = SessionManager::with_port_probe(
+            ssh,
+            test_runtime.runtime(),
+            vec![target()],
+            FakePortProbe::default(),
+        )
+        .unwrap();
+        let mut app =
+            AppState::with_store(manager, Vec::new(), RuleStore::at(&config_path)).unwrap();
+
+        let id = app
+            .add_rule(
+                &TargetId::new("dev"),
+                ForwardRuleDraft::parse("web", "", "", "", "3000").unwrap(),
+            )
+            .unwrap();
+        let mut reloaded_store = RuleStore::at(&config_path);
+        assert_eq!(reloaded_store.load(&[target()]).unwrap().len(), 1);
+
+        app.remove_rule(&id).unwrap();
+        assert!(reloaded_store.load(&[target()]).unwrap().is_empty());
+    }
+
+    #[test]
+    fn failed_persistence_rolls_back_definition_mutation() {
+        let test_runtime = TestRuntime::new();
+        let blocked_parent = test_runtime.0.join("not-a-directory");
+        fs::write(&blocked_parent, "block directory creation").unwrap();
+        let ssh = FakeSsh::successful();
+        let manager = SessionManager::with_port_probe(
+            ssh,
+            test_runtime.runtime(),
+            vec![target()],
+            FakePortProbe::default(),
+        )
+        .unwrap();
+        let mut app = AppState::with_store(
+            manager,
+            Vec::new(),
+            RuleStore::at(blocked_parent.join("config.toml")),
+        )
+        .unwrap();
+
+        assert!(
+            app.add_rule(
+                &TargetId::new("dev"),
+                ForwardRuleDraft::parse("web", "", "", "", "3000").unwrap(),
+            )
+            .is_err()
+        );
         assert!(app.rules_for(&TargetId::new("dev")).is_empty());
     }
 }

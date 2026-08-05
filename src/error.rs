@@ -5,7 +5,7 @@ use std::error::Error as StdError;
 use thiserror::Error;
 
 use crate::application::{ManagerError, RuleError};
-use crate::config::ConfigError;
+use crate::config::{ConfigError, StoreError};
 use crate::runtime::RuntimeError;
 use crate::ssh::SshError;
 use crate::tui::TuiError;
@@ -19,6 +19,9 @@ pub enum AppError {
     /// SSH target discovery failed.
     #[error(transparent)]
     Configuration(#[from] ConfigError),
+    /// Persistent portdeck configuration failed to load or save.
+    #[error(transparent)]
+    Store(#[from] StoreError),
     /// Runtime directory setup failed.
     #[error(transparent)]
     Runtime(#[from] RuntimeError),

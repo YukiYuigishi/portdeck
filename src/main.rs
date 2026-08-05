@@ -2,7 +2,7 @@ use std::env;
 use std::process::ExitCode;
 
 use portdeck::application::{AppState, SessionManager};
-use portdeck::config::TargetDiscovery;
+use portdeck::config::{RuleStore, TargetDiscovery};
 use portdeck::error::{AppError, Result};
 use portdeck::runtime::RuntimeDirectory;
 use portdeck::ssh::OpenSsh;
@@ -62,6 +62,8 @@ fn run_tui(version: &str) -> Result<()> {
     tracing::info!(version, "portdeck starting");
 
     let targets = TargetDiscovery::from_environment()?.discover()?;
+    let mut rule_store = RuleStore::from_environment()?;
+    let saved_rules = rule_store.load(&targets)?;
     let runtime = RuntimeDirectory::from_environment()?;
     let mut sessions = SessionManager::new(OpenSsh::default(), runtime, targets)?;
     let openssh_version = sessions.probe_openssh()?;
@@ -76,7 +78,7 @@ fn run_tui(version: &str) -> Result<()> {
         "runtime recovery completed"
     );
 
-    let mut app = AppState::new(sessions, Vec::new())?;
+    let mut app = AppState::with_store(sessions, saved_rules, rule_store)?;
     let tui_result = portdeck::tui::run(&mut app);
     let shutdown_errors = app.sessions_mut().shutdown_all();
 

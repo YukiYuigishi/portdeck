@@ -38,9 +38,9 @@ MVPは、Linux上でシステムOpenSSHのControlMasterを管理し、TUIから 
 
 ## Phase 1: Project Bootstrap
 
-- [ ] Rustプロジェクトを初期化する。
+- [x] Rustプロジェクトを初期化する。
 - [x] formatter、lint、testの基本コマンドを決める。
-- [ ] `domain`、`ssh`、`config`、`runtime`、`tui` のモジュール境界を作る。
+- [x] `domain`、`ssh`、`config`、`runtime`、`tui` のモジュール境界を作る。
 - [ ] 構造化ログとエラー型の最小構成を作る。
 - [x] CIでformat、lint、unit testを実行する。
 

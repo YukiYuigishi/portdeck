@@ -4,6 +4,9 @@
 //! construct or execute OpenSSH commands.
 
 use std::io::{self, Stdout, stdout};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::execute;
@@ -17,6 +20,8 @@ use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
+use signal_hook::consts::signal::{SIGHUP, SIGINT, SIGTERM};
+use signal_hook::flag;
 use thiserror::Error;
 
 use crate::application::{AppActionError, AppState, ForwardRuleDraft, ManagerError, PortProbe};
@@ -171,6 +176,15 @@ pub enum TuiError {
     Io(#[from] io::Error),
 }
 
+/// Initial status and diagnostic information from startup recovery.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StartupNotice {
+    /// One-line startup summary.
+    pub status: String,
+    /// Details opened with `e`.
+    pub error_detail: Option<String>,
+}
+
 type PortdeckTerminal = Terminal<CrosstermBackend<Stdout>>;
 
 struct TerminalGuard {
@@ -254,13 +268,31 @@ impl Drop for TerminalGuard {
 }
 
 /// Runs the blocking MVP event loop until the user confirms quit.
-pub fn run<B: SshClient, P: PortProbe>(app: &mut AppState<B, P>) -> Result<(), TuiError> {
+pub fn run<B: SshClient, P: PortProbe>(
+    app: &mut AppState<B, P>,
+    startup_notice: Option<StartupNotice>,
+) -> Result<(), TuiError> {
     let mut terminal = TerminalGuard::enter()?;
     let mut ui = UiState::default();
+    if let Some(notice) = startup_notice {
+        ui.status = notice.status;
+        ui.error_detail = notice.error_detail;
+    }
     ui.clamp(app);
+    let termination_requested = Arc::new(AtomicBool::new(false));
+    for signal in [SIGINT, SIGTERM, SIGHUP] {
+        flag::register(signal, Arc::clone(&termination_requested))?;
+    }
 
     while !ui.should_quit {
         terminal.terminal.draw(|frame| render(frame, &ui, app))?;
+        if termination_requested.load(Ordering::Relaxed) {
+            ui.should_quit = true;
+            continue;
+        }
+        if !event::poll(Duration::from_millis(250))? {
+            continue;
+        }
         let event = event::read()?;
         let Event::Key(key) = event else {
             continue;

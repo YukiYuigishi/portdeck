@@ -532,6 +532,7 @@ dependencies = [
  "ratatui",
  "serde",
  "sha2",
+ "signal-hook",
  "thiserror",
  "toml",
  "tracing",

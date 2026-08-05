@@ -6,6 +6,7 @@ use portdeck::config::{RuleStore, TargetDiscovery};
 use portdeck::error::{AppError, Result};
 use portdeck::runtime::RuntimeDirectory;
 use portdeck::ssh::OpenSsh;
+use portdeck::tui::StartupNotice;
 
 fn main() -> ExitCode {
     match run() {
@@ -85,8 +86,43 @@ fn run_tui(version: &str) -> Result<()> {
         "runtime recovery completed"
     );
 
+    let mut startup_details = config_failures
+        .iter()
+        .chain(recovery.failures.iter())
+        .map(|failure| {
+            failure
+                .detail
+                .as_ref()
+                .map(|detail| format!("{}: {detail}", failure.summary))
+                .unwrap_or_else(|| failure.summary.clone())
+        })
+        .collect::<Vec<_>>();
+    startup_details.extend(
+        recovery
+            .unknown_paths
+            .iter()
+            .map(|path| format!("未確認のruntime entryを保持しました: {}", path.display())),
+    );
+    let recovered_count = recovery.terminated_targets.len() + recovery.removed_stale_paths.len();
+    let startup_notice = if !startup_details.is_empty() {
+        Some(StartupNotice {
+            status: format!(
+                "起動診断に{}件の注意があります（e: 詳細）",
+                startup_details.len()
+            ),
+            error_detail: Some(startup_details.join("\n")),
+        })
+    } else if recovered_count > 0 {
+        Some(StartupNotice {
+            status: format!("前回のruntime entryを{recovered_count}件回収しました"),
+            error_detail: None,
+        })
+    } else {
+        None
+    };
+
     let mut app = AppState::with_store(sessions, saved_rules, rule_store)?;
-    let tui_result = portdeck::tui::run(&mut app);
+    let tui_result = portdeck::tui::run(&mut app, startup_notice);
     let shutdown_errors = app.sessions_mut().shutdown_all();
 
     if !shutdown_errors.is_empty() {

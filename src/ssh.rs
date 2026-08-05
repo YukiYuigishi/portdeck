@@ -192,6 +192,34 @@ pub struct OpenSsh<E = SystemCommandExecutor> {
     executor: E,
 }
 
+/// Operations required by the application layer from an SSH backend.
+pub trait SshClient {
+    /// Detects the executable and reports its version text.
+    fn version(&self) -> Result<SshOutput, SshError>;
+    /// Resolves effective configuration for one concrete alias.
+    fn resolve_config(&self, host_alias: &str) -> Result<SshOutput, SshError>;
+    /// Starts a dedicated ControlMaster.
+    fn connect(&self, host_alias: &str, control_path: &Path) -> Result<SshOutput, SshError>;
+    /// Checks a dedicated ControlMaster.
+    fn check(&self, host_alias: &str, control_path: &Path) -> Result<SshOutput, SshError>;
+    /// Adds one local forward.
+    fn add_local_forward(
+        &self,
+        host_alias: &str,
+        control_path: &Path,
+        forward: &LocalForwardSpec,
+    ) -> Result<SshOutput, SshError>;
+    /// Cancels one exact local forward.
+    fn cancel_local_forward(
+        &self,
+        host_alias: &str,
+        control_path: &Path,
+        forward: &LocalForwardSpec,
+    ) -> Result<SshOutput, SshError>;
+    /// Stops a dedicated ControlMaster.
+    fn disconnect(&self, host_alias: &str, control_path: &Path) -> Result<SshOutput, SshError>;
+}
+
 impl Default for OpenSsh<SystemCommandExecutor> {
     fn default() -> Self {
         Self::new("ssh")
@@ -314,6 +342,46 @@ impl<E: CommandExecutor> OpenSsh<E> {
                 executable: self.executable.clone(),
                 source,
             })
+    }
+}
+
+impl<E: CommandExecutor> SshClient for OpenSsh<E> {
+    fn version(&self) -> Result<SshOutput, SshError> {
+        OpenSsh::version(self)
+    }
+
+    fn resolve_config(&self, host_alias: &str) -> Result<SshOutput, SshError> {
+        OpenSsh::resolve_config(self, host_alias)
+    }
+
+    fn connect(&self, host_alias: &str, control_path: &Path) -> Result<SshOutput, SshError> {
+        OpenSsh::connect(self, host_alias, control_path)
+    }
+
+    fn check(&self, host_alias: &str, control_path: &Path) -> Result<SshOutput, SshError> {
+        OpenSsh::check(self, host_alias, control_path)
+    }
+
+    fn add_local_forward(
+        &self,
+        host_alias: &str,
+        control_path: &Path,
+        forward: &LocalForwardSpec,
+    ) -> Result<SshOutput, SshError> {
+        OpenSsh::add_local_forward(self, host_alias, control_path, forward)
+    }
+
+    fn cancel_local_forward(
+        &self,
+        host_alias: &str,
+        control_path: &Path,
+        forward: &LocalForwardSpec,
+    ) -> Result<SshOutput, SshError> {
+        OpenSsh::cancel_local_forward(self, host_alias, control_path, forward)
+    }
+
+    fn disconnect(&self, host_alias: &str, control_path: &Path) -> Result<SshOutput, SshError> {
+        OpenSsh::disconnect(self, host_alias, control_path)
     }
 }
 

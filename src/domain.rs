@@ -288,7 +288,7 @@ fn valid_session_transition(from: SessionState, to: SessionState) -> bool {
             | (Connecting, Connected | Failed | Disconnected)
             | (Connected, Stopping | Failed | Disconnected)
             | (Stopping, Disconnected | Failed)
-            | (Failed, Disconnected)
+            | (Failed, Disconnected | Stopping)
     )
 }
 

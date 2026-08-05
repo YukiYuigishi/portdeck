@@ -16,6 +16,263 @@ use crate::ssh::{LocalForwardSpec, SshClient, SshError, SshOutput};
 /// Maximum number of sequential ports considered for one add operation.
 pub const DEFAULT_PORT_ATTEMPTS: usize = 20;
 
+/// Validated values used to create a saved forward rule.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForwardRuleDraft {
+    /// Optional display label.
+    pub label: Option<String>,
+    /// Local-side bind address.
+    pub bind_address: String,
+    /// Preferred local port, or the remote port when omitted.
+    pub requested_local_port: Option<u16>,
+    /// Host reached from the remote side.
+    pub remote_host: String,
+    /// Port reached from the remote side.
+    pub remote_port: u16,
+    /// Whether activation will expose the listener beyond loopback.
+    pub public_bind: bool,
+}
+
+impl ForwardRuleDraft {
+    /// Parses form values and applies loopback defaults.
+    pub fn parse(
+        label: &str,
+        bind_address: &str,
+        requested_local_port: &str,
+        remote_host: &str,
+        remote_port: &str,
+    ) -> Result<Self, RuleError> {
+        if label.contains(['\0', '\n', '\r']) {
+            return Err(RuleError::InvalidLabel);
+        }
+        let label = (!label.trim().is_empty()).then(|| label.trim().to_owned());
+        let bind_address = if bind_address.trim().is_empty() {
+            "127.0.0.1".to_owned()
+        } else {
+            bind_address.trim().to_owned()
+        };
+        let remote_host = if remote_host.trim().is_empty() {
+            "127.0.0.1".to_owned()
+        } else {
+            remote_host.trim().to_owned()
+        };
+        let remote_port = parse_port(remote_port, "リモート宛先ポート")?;
+        let requested_local_port = if requested_local_port.trim().is_empty() {
+            None
+        } else {
+            Some(parse_port(requested_local_port, "希望ローカルポート")?)
+        };
+        let validation_port = requested_local_port.unwrap_or(remote_port);
+        let spec = LocalForwardSpec::new(&bind_address, validation_port, &remote_host, remote_port)
+            .map_err(|error| RuleError::InvalidForward(error.to_string()))?;
+
+        Ok(Self {
+            label,
+            bind_address,
+            requested_local_port,
+            remote_host,
+            remote_port,
+            public_bind: spec.is_public_bind(),
+        })
+    }
+}
+
+/// Persistent definitions plus runtime session/forward services.
+#[derive(Debug)]
+pub struct AppState<B, P = SystemPortProbe> {
+    sessions: SessionManager<B, P>,
+    rules: BTreeMap<TargetId, Vec<ForwardRule>>,
+    next_rule_number: u64,
+}
+
+impl<B: SshClient, P: PortProbe> AppState<B, P> {
+    /// Creates application state from discovered sessions and saved rules.
+    pub fn new(sessions: SessionManager<B, P>, rules: Vec<ForwardRule>) -> Result<Self, RuleError> {
+        let target_ids = sessions
+            .entries()
+            .iter()
+            .map(|entry| entry.target.id.clone())
+            .collect::<Vec<_>>();
+        let mut grouped_rules: BTreeMap<TargetId, Vec<ForwardRule>> = BTreeMap::new();
+        let mut seen_rule_ids = std::collections::HashSet::new();
+        for rule in rules {
+            if !target_ids.contains(&rule.target_id) {
+                continue;
+            }
+            if !seen_rule_ids.insert(rule.id.clone()) {
+                return Err(RuleError::DuplicateRuleId(rule.id));
+            }
+            grouped_rules
+                .entry(rule.target_id.clone())
+                .or_default()
+                .push(rule);
+        }
+
+        Ok(Self {
+            sessions,
+            rules: grouped_rules,
+            next_rule_number: 1,
+        })
+    }
+
+    /// Session manager used for connection-level operations.
+    pub fn sessions(&self) -> &SessionManager<B, P> {
+        &self.sessions
+    }
+
+    /// Mutable session manager used by the event loop.
+    pub fn sessions_mut(&mut self) -> &mut SessionManager<B, P> {
+        &mut self.sessions
+    }
+
+    /// Saved rules belonging to one target.
+    pub fn rules_for(&self, target_id: &TargetId) -> &[ForwardRule] {
+        self.rules.get(target_id).map(Vec::as_slice).unwrap_or(&[])
+    }
+
+    /// All saved rules, grouped in target discovery order.
+    pub fn all_rules(&self) -> Vec<&ForwardRule> {
+        self.sessions
+            .entries()
+            .iter()
+            .flat_map(|entry| self.rules_for(&entry.target.id))
+            .collect()
+    }
+
+    /// Creates an inactive saved rule.
+    pub fn add_rule(
+        &mut self,
+        target_id: &TargetId,
+        draft: ForwardRuleDraft,
+    ) -> Result<ForwardRuleId, RuleError> {
+        if self.sessions.entry(target_id).is_none() {
+            return Err(RuleError::UnknownTarget(target_id.clone()));
+        }
+        let id = self.next_rule_id();
+        let rule = ForwardRule {
+            id: id.clone(),
+            target_id: target_id.clone(),
+            label: draft.label,
+            bind_address: draft.bind_address,
+            requested_local_port: draft.requested_local_port,
+            remote_host: draft.remote_host,
+            remote_port: draft.remote_port,
+        };
+        self.rules.entry(target_id.clone()).or_default().push(rule);
+        Ok(id)
+    }
+
+    /// Activates one saved rule.
+    pub fn activate_rule(&mut self, rule_id: &ForwardRuleId) -> Result<u16, AppActionError> {
+        let rule = self.find_rule(rule_id)?.clone();
+        self.sessions
+            .activate_forward(&rule)
+            .map_err(AppActionError::Manager)
+    }
+
+    /// Cancels one active saved rule.
+    pub fn cancel_rule(&mut self, rule_id: &ForwardRuleId) -> Result<(), AppActionError> {
+        let rule = self.find_rule(rule_id)?.clone();
+        self.sessions
+            .cancel_forward(&rule)
+            .map_err(AppActionError::Manager)
+    }
+
+    /// Deletes only a rule with no live runtime forwarding data.
+    pub fn remove_rule(&mut self, rule_id: &ForwardRuleId) -> Result<(), AppActionError> {
+        if let Some(runtime) = self
+            .sessions
+            .entries()
+            .iter()
+            .find_map(|entry| entry.forwards.get(rule_id))
+            && (runtime.state != ForwardState::Inactive || runtime.actual_local_port.is_some())
+        {
+            return Err(AppActionError::Rule(RuleError::RuleStillActive(
+                rule_id.clone(),
+            )));
+        }
+
+        for rules in self.rules.values_mut() {
+            if let Some(index) = rules.iter().position(|rule| &rule.id == rule_id) {
+                rules.remove(index);
+                return Ok(());
+            }
+        }
+        Err(AppActionError::Rule(RuleError::UnknownRule(
+            rule_id.clone(),
+        )))
+    }
+
+    fn find_rule(&self, rule_id: &ForwardRuleId) -> Result<&ForwardRule, AppActionError> {
+        self.rules
+            .values()
+            .flatten()
+            .find(|rule| &rule.id == rule_id)
+            .ok_or_else(|| AppActionError::Rule(RuleError::UnknownRule(rule_id.clone())))
+    }
+
+    fn next_rule_id(&mut self) -> ForwardRuleId {
+        loop {
+            let id = ForwardRuleId::new(format!("rule-{:08}", self.next_rule_number));
+            self.next_rule_number = self.next_rule_number.saturating_add(1);
+            if self.rules.values().flatten().all(|rule| rule.id != id) {
+                return id;
+            }
+        }
+    }
+}
+
+/// Saved-rule input or catalog failure.
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+pub enum RuleError {
+    /// Labels must be a single printable line.
+    #[error("ラベルに改行またはNULは使用できません")]
+    InvalidLabel,
+    /// Port text was empty, zero, or non-numeric.
+    #[error("{field}は1から65535の数値で入力してください")]
+    InvalidPort {
+        /// Form field name.
+        field: &'static str,
+    },
+    /// A bind or remote address was not representable as `-L`.
+    #[error("転送指定が不正です: {0}")]
+    InvalidForward(String),
+    /// A loaded or selected target is not in the current SSH catalog.
+    #[error("unknown SSH target: {}", .0.as_str())]
+    UnknownTarget(TargetId),
+    /// A selected rule does not exist.
+    #[error("unknown forward rule: {}", .0.as_str())]
+    UnknownRule(ForwardRuleId),
+    /// Loaded configuration reused an identifier.
+    #[error("duplicate forward rule ID: {}", .0.as_str())]
+    DuplicateRuleId(ForwardRuleId),
+    /// Definition deletion would conceal a possibly active OpenSSH forward.
+    #[error("forward rule {} still has runtime state", .0.as_str())]
+    RuleStillActive(ForwardRuleId),
+}
+
+/// Error from a user-requested rule action.
+#[derive(Debug, Error)]
+pub enum AppActionError {
+    /// Session or OpenSSH operation failed.
+    #[error(transparent)]
+    Manager(#[from] ManagerError),
+    /// Saved-rule operation failed.
+    #[error(transparent)]
+    Rule(#[from] RuleError),
+}
+
+fn parse_port(value: &str, field: &'static str) -> Result<u16, RuleError> {
+    let port = value
+        .trim()
+        .parse::<u16>()
+        .map_err(|_| RuleError::InvalidPort { field })?;
+    if port == 0 {
+        return Err(RuleError::InvalidPort { field });
+    }
+    Ok(port)
+}
+
 /// A target together with its session and runtime forwards.
 #[derive(Debug, Clone)]
 pub struct SessionEntry {
@@ -700,7 +957,9 @@ mod tests {
     use crate::runtime::RuntimeDirectory;
     use crate::ssh::{LocalForwardSpec, SshClient, SshError, SshOutput};
 
-    use super::{PortProbe, SessionManager, port_candidates};
+    use super::{
+        AppState, ForwardRuleDraft, PortProbe, RuleError, SessionManager, port_candidates,
+    };
 
     #[derive(Debug, Default)]
     struct FakeSsh {
@@ -1080,5 +1339,82 @@ mod tests {
         assert_eq!(port_candidates(65000, 3), [65000, 65001, 65002]);
         assert_eq!(port_candidates(u16::MAX - 1, 20), [u16::MAX - 1, u16::MAX]);
         assert!(port_candidates(1234, 0).is_empty());
+    }
+
+    #[test]
+    fn forward_form_defaults_to_loopback_and_remote_port() {
+        let draft = ForwardRuleDraft::parse(" web ", "", "", "", "3000").unwrap();
+
+        assert_eq!(draft.label.as_deref(), Some("web"));
+        assert_eq!(draft.bind_address, "127.0.0.1");
+        assert_eq!(draft.requested_local_port, None);
+        assert_eq!(draft.remote_host, "127.0.0.1");
+        assert_eq!(draft.remote_port, 3000);
+        assert!(!draft.public_bind);
+    }
+
+    #[test]
+    fn forward_form_marks_public_binds_and_rejects_zero_port() {
+        let draft = ForwardRuleDraft::parse("", "0.0.0.0", "8080", "db", "5432").unwrap();
+        assert!(draft.public_bind);
+        assert_eq!(
+            ForwardRuleDraft::parse("", "", "", "", "0").unwrap_err(),
+            RuleError::InvalidPort {
+                field: "リモート宛先ポート"
+            }
+        );
+    }
+
+    #[test]
+    fn saved_definition_remains_separate_from_runtime_state() {
+        let test_runtime = TestRuntime::new();
+        let ssh = FakeSsh::successful();
+        let manager = SessionManager::with_port_probe(
+            ssh,
+            test_runtime.runtime(),
+            vec![target()],
+            FakePortProbe::default(),
+        )
+        .unwrap();
+        let mut app = AppState::new(manager, Vec::new()).unwrap();
+        let draft = ForwardRuleDraft::parse("web", "", "", "", "3000").unwrap();
+
+        let rule_id = app.add_rule(&TargetId::new("dev"), draft).unwrap();
+
+        assert_eq!(app.rules_for(&TargetId::new("dev")).len(), 1);
+        assert!(
+            !app.sessions()
+                .entry(&TargetId::new("dev"))
+                .unwrap()
+                .forwards
+                .contains_key(&rule_id)
+        );
+    }
+
+    #[test]
+    fn active_definition_cannot_be_deleted_until_cancel_succeeds() {
+        let test_runtime = TestRuntime::new();
+        let ssh = FakeSsh::successful();
+        let manager = SessionManager::with_port_probe(
+            ssh,
+            test_runtime.runtime(),
+            vec![target()],
+            FakePortProbe::default(),
+        )
+        .unwrap();
+        let mut app = AppState::new(manager, Vec::new()).unwrap();
+        let rule_id = app
+            .add_rule(
+                &TargetId::new("dev"),
+                ForwardRuleDraft::parse("web", "", "8080", "", "3000").unwrap(),
+            )
+            .unwrap();
+        app.sessions_mut().connect(&TargetId::new("dev")).unwrap();
+        app.activate_rule(&rule_id).unwrap();
+
+        assert!(app.remove_rule(&rule_id).is_err());
+        app.cancel_rule(&rule_id).unwrap();
+        app.remove_rule(&rule_id).unwrap();
+        assert!(app.rules_for(&TargetId::new("dev")).is_empty());
     }
 }

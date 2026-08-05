@@ -2,7 +2,9 @@
 
 ## Current Status
 
-Phase 1のプロジェクト基盤を完了。次はPhase 2のOpenSSH capability probeに着手する。
+portdeck 0.1.0のMVP実装を完了。OpenSSH 9.6p1を使った隔離sshd統合テストで、ControlMaster、同一master上の複数転送、実TCP通信、個別取消、終了を確認済み。
+
+Phase 9のうち、複数OpenSSHバージョンと実接続先を使う認証・ProxyJump・ホスト鍵の互換性マトリクスは継続課題として残す。これは現在のMVP実装範囲を広げるものではない。
 
 MVPは、Linux上でシステムOpenSSHのControlMasterを管理し、TUIから `-L` ローカルポートフォワードを追加・削除できる状態を指す。
 
@@ -28,7 +30,7 @@ MVPは、Linux上でシステムOpenSSHのControlMasterを管理し、TUIから 
 - [x] ControlMasterを使用する方針を定義する。
 - [x] MVPと将来機能を分離する。
 - [x] セキュリティ要件と非目標を定義する。
-- [ ] プロジェクト名とバイナリ名を決定する。
+- [x] プロジェクト名とバイナリ名を決定する（`portdeck`）。
 - [ ] 対象とする最低OpenSSHバージョンを実機で確認する。
 
 ### Exit Criteria
@@ -54,15 +56,15 @@ MVPは、Linux上でシステムOpenSSHのControlMasterを管理し、TUIから 
 
 実装を広げる前に、実際のOpenSSHで必要な操作が成立することを小さな検証コードまたは統合テストで確認する。
 
-- [ ] `ssh` 実行ファイルを検出する。
-- [ ] `ssh -V` の取得と診断表示を実装する。
-- [ ] 専用ControlPathでmasterを開始する。
-- [ ] `-O check` でmasterを確認する。
-- [ ] `-O forward -L ...` で転送を追加する。
-- [ ] `-O cancel -L ...` で転送を削除する。
-- [ ] `-O exit` でmasterを終了する。
-- [ ] 認証が必要な場合のTUI suspend/resume方針を端末上で検証する。
-- [ ] OpenSSH stderrと終了コードを記録し、失敗パターンを整理する。
+- [x] `ssh` 実行ファイルを検出する。
+- [x] `ssh -V` の取得と診断表示を実装する。
+- [x] 専用ControlPathでmasterを開始する。
+- [x] `-O check` でmasterを確認する。
+- [x] `-O forward -L ...` で転送を追加する。
+- [x] `-O cancel -L ...` で転送を削除する。
+- [x] `-O exit` でmasterを終了する。
+- [x] 認証が必要な場合のTUI suspend/resume方針を実装し、PTY上でTUIの停止・復元境界を検証する。
+- [x] OpenSSH stderrと終了コードを記録し、失敗パターンを整理する。
 
 ### Exit Criteria
 
@@ -73,14 +75,14 @@ MVPは、Linux上でシステムOpenSSHのControlMasterを管理し、TUIから 
 
 ## Phase 3: Domain and Command Adapter
 
-- [ ] `Target`、`Session`、`ForwardRule`、`ActiveForward` を定義する。
-- [ ] セッション状態遷移を実装する。
-- [ ] 転送状態遷移を実装する。
-- [ ] OpenSSH実行結果を表す型を定義する。
-- [ ] argvベースのコマンドビルダーを実装する。
-- [ ] `connect`、`check`、`add_local_forward`、`cancel_local_forward`、`disconnect` を実装する。
-- [ ] 外部コマンド実行部分をテスト用に差し替え可能にする。
-- [ ] 偽 `ssh` によるadapter testを追加する。
+- [x] `Target`、`Session`、`ForwardRule`、`ActiveForward` を定義する。
+- [x] セッション状態遷移を実装する。
+- [x] 転送状態遷移を実装する。
+- [x] OpenSSH実行結果を表す型を定義する。
+- [x] argvベースのコマンドビルダーを実装する。
+- [x] `connect`、`check`、`add_local_forward`、`cancel_local_forward`、`disconnect` を実装する。
+- [x] 外部コマンド実行部分をテスト用に差し替え可能にする。
+- [x] 偽 `ssh` によるadapter testを追加する。
 
 ### Exit Criteria
 
@@ -90,13 +92,13 @@ MVPは、Linux上でシステムOpenSSHのControlMasterを管理し、TUIから 
 
 ## Phase 4: SSH Target Discovery
 
-- [ ] `~/.ssh/config` の具体的なHostエイリアスを列挙する。
-- [ ] `Include` を再帰的に処理する。
-- [ ] include循環と重複を安全に処理する。
-- [ ] ワイルドカードと否定パターンを候補一覧から除外する。
-- [ ] `ssh -G <alias>` から表示用の有効設定を取得する。
-- [ ] 設定ファイルが存在しない場合を正常系として扱う。
-- [ ] 不正なHostエイリアスをコマンドへ渡さない入力検証を追加する。
+- [x] `~/.ssh/config` の具体的なHostエイリアスを列挙する。
+- [x] `Include` を再帰的に処理する。
+- [x] include循環と重複を安全に処理する。
+- [x] ワイルドカードと否定パターンを候補一覧から除外する。
+- [x] `ssh -G <alias>` から表示用の有効設定を取得する。
+- [x] 設定ファイルが存在しない場合を正常系として扱う。
+- [x] 不正なHostエイリアスをコマンドへ渡さない入力検証を追加する。
 
 ### Exit Criteria
 
@@ -106,15 +108,15 @@ MVPは、Linux上でシステムOpenSSHのControlMasterを管理し、TUIから 
 
 ## Phase 5: Runtime and Control Socket Lifecycle
 
-- [ ] XDG runtime directoryを解決する。
-- [ ] 所有者限定のランタイムディレクトリを作成する。
-- [ ] 接続先ごとの短く安定したControlPathを生成する。
-- [ ] セッション開始と `-O check` による状態更新を実装する。
-- [ ] セッション終了処理を実装する。
-- [ ] 正常終了時に全専用masterを終了する。
-- [ ] 前回異常終了で残ったcontrol socketを検出する。
-- [ ] 生存masterと単なるstale socketを区別して回収する。
-- [ ] 他ツールのControlPathを触らないことをテストする。
+- [x] XDG runtime directoryを解決する。
+- [x] 所有者限定のランタイムディレクトリを作成する。
+- [x] 接続先ごとの短く安定したControlPathを生成する。
+- [x] セッション開始と `-O check` による状態更新を実装する。
+- [x] セッション終了処理を実装する。
+- [x] 正常終了時に全専用masterを終了する。
+- [x] 前回異常終了で残ったcontrol socketを検出する。
+- [x] 生存masterと単なるstale socketを区別して回収する。
+- [x] 他ツールのControlPathを触らないことをテストする。
 
 ### Exit Criteria
 
@@ -124,15 +126,15 @@ MVPは、Linux上でシステムOpenSSHのControlMasterを管理し、TUIから 
 
 ## Phase 6: Local Forward Management
 
-- [ ] 転送入力値を検証する。
-- [ ] 既定値 `127.0.0.1:<remote-port>` を実装する。
-- [ ] IPv4、ホスト名、IPv6を正しく正規化する。
-- [ ] 希望ローカルポートへの転送追加を実装する。
-- [ ] ポート競合時の限定的な候補探索を実装する。
-- [ ] 実際に確保したローカルポートを状態へ保存する。
-- [ ] 正確な転送指定による取消を実装する。
-- [ ] セッション切断時に配下の転送状態を更新する。
-- [ ] `0.0.0.0`、`::`、`*` bind時の警告情報を実装する。
+- [x] 転送入力値を検証する。
+- [x] 既定値 `127.0.0.1:<remote-port>` を実装する。
+- [x] IPv4、ホスト名、IPv6を正しく正規化する。
+- [x] 希望ローカルポートへの転送追加を実装する。
+- [x] ポート競合時の限定的な候補探索を実装する。
+- [x] 実際に確保したローカルポートを状態へ保存する。
+- [x] 正確な転送指定による取消を実装する。
+- [x] セッション切断時に配下の転送状態を更新する。
+- [x] `0.0.0.0`、`::`、`*` bind時の警告情報を実装する。
 
 ### Exit Criteria
 
@@ -143,17 +145,17 @@ MVPは、Linux上でシステムOpenSSHのControlMasterを管理し、TUIから 
 
 ## Phase 7: MVP TUI
 
-- [ ] アプリケーションイベントループを実装する。
-- [ ] 接続先・セッション一覧ペインを実装する。
-- [ ] 転送一覧ペインを実装する。
-- [ ] 接続・切断操作を実装する。
-- [ ] 転送追加フォームを実装する。
-- [ ] 転送削除と確認表示を実装する。
-- [ ] ステータス行とキーヘルプを実装する。
-- [ ] OpenSSH stderrの詳細表示を実装する。
-- [ ] TUIからOpenSSH認証画面へのsuspend/resumeを実装する。
-- [ ] 小さい端末サイズの表示を実装する。
-- [ ] 色以外の状態表現を追加する。
+- [x] アプリケーションイベントループを実装する。
+- [x] 接続先・セッション一覧ペインを実装する。
+- [x] 転送一覧ペインを実装する。
+- [x] 接続・切断操作を実装する。
+- [x] 転送追加フォームを実装する。
+- [x] 転送削除と確認表示を実装する。
+- [x] ステータス行とキーヘルプを実装する。
+- [x] OpenSSH stderrの詳細表示を実装する。
+- [x] TUIからOpenSSH認証画面へのsuspend/resumeを実装する。
+- [x] 小さい端末サイズの表示を実装する。
+- [x] 色以外の状態表現を追加する。
 
 ### Exit Criteria
 
@@ -164,13 +166,13 @@ MVPは、Linux上でシステムOpenSSHのControlMasterを管理し、TUIから 
 
 ## Phase 8: Persistence and Recovery
 
-- [ ] 本ツール固有設定の保存形式を確定する。
-- [ ] ラベルと接続先に属する転送ルール定義を保存する。
-- [ ] atomic writeを実装する。
-- [ ] 壊れた設定ファイルの診断と安全な失敗を実装する。
-- [ ] 実行状態と保存済み定義を分離する。
-- [ ] 異常終了後の起動時リカバリー画面または処理を実装する。
-- [ ] 認証情報が保存対象に入らないことを確認する。
+- [x] 本ツール固有設定の保存形式を確定する（TOML schema version 1）。
+- [x] ラベルと接続先に属する転送ルール定義を保存する。
+- [x] atomic writeを実装する。
+- [x] 壊れた設定ファイルの診断と安全な失敗を実装する。
+- [x] 実行状態と保存済み定義を分離する。
+- [x] 異常終了後の起動時リカバリー画面または処理を実装する。
+- [x] 認証情報が保存対象に入らないことを確認する。
 
 ### Exit Criteria
 
@@ -185,10 +187,10 @@ MVPは、Linux上でシステムOpenSSHのControlMasterを管理し、TUIから 
 - [ ] 公開鍵、ssh-agent、パスフレーズ、keyboard-interactive認証で確認する。
 - [ ] ホスト鍵初回確認とホスト鍵不一致を確認する。
 - [ ] サーバー側でTCP forwardingが禁止された場合を確認する。
-- [ ] 長いHostエイリアスでもControlPath長制限を超えないことを確認する。
-- [ ] SIGINT、SIGTERM、端末切断時の後処理を確認する。
-- [ ] READMEへ導入方法、権限、安全上の注意を書く。
-- [ ] MVP acceptance criteriaを通しで確認する。
+- [x] 長いHostエイリアスでもControlPath長制限を超えないことを確認する。
+- [x] SIGINT、SIGTERM、端末切断相当のSIGHUPで端末復元と正常終了を確認する。
+- [x] READMEへ導入方法、権限、安全上の注意を書く。
+- [x] MVP acceptance criteriaをunit、adapter、TUI buffer、隔離sshd統合テストで確認する。
 
 ### Exit Criteria
 
@@ -236,8 +238,6 @@ MVP完了後、利用上の必要性を確認して着手する。
 
 ## Deferred Decisions
 
-- プロジェクト名、バイナリ名
-- 設定ファイルの正式なスキーマ
 - 最低OpenSSHバージョン
 - macOS正式対応の時期
 - TUI終了後もセッションを残すdetach機能

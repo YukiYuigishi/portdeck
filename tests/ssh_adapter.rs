@@ -80,3 +80,29 @@ fn captures_fake_ssh_output_status_and_individual_arguments() {
         ]
     );
 }
+
+#[test]
+fn interactive_connect_retains_stderr_for_tui_diagnostics() {
+    let fake = FakeSsh::new(17);
+    let ssh = OpenSsh::new(&fake.executable);
+
+    let output = ssh.connect("dev", Path::new("control")).unwrap();
+
+    assert!(!output.success);
+    assert_eq!(output.exit_code, Some(17));
+    assert_eq!(output.stdout, "");
+    assert_eq!(output.stderr, "fake stderr\n");
+    assert_eq!(
+        fake.arguments(),
+        [
+            "-M",
+            "-N",
+            "-f",
+            "-S",
+            "control",
+            "-o",
+            "ClearAllForwardings=yes",
+            "dev",
+        ]
+    );
+}

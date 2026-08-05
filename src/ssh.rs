@@ -113,7 +113,7 @@ impl SshCommand {
 pub enum ExecutionMode {
     /// Capture stdout and stderr for diagnostics.
     Capture,
-    /// Give OpenSSH direct access to the current terminal.
+    /// Give OpenSSH terminal input while retaining stderr for later diagnostics.
     Interactive,
 }
 
@@ -169,16 +169,16 @@ impl CommandExecutor for SystemCommandExecutor {
                 })
             }
             ExecutionMode::Interactive => {
-                let status = process
+                let output = process
                     .stdin(Stdio::inherit())
                     .stdout(Stdio::inherit())
-                    .stderr(Stdio::inherit())
-                    .status()?;
+                    .stderr(Stdio::piped())
+                    .output()?;
                 Ok(SshOutput {
-                    success: status.success(),
-                    exit_code: status.code(),
+                    success: output.status.success(),
+                    exit_code: output.status.code(),
                     stdout: String::new(),
-                    stderr: String::new(),
+                    stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
                 })
             }
         }

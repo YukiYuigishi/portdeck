@@ -27,6 +27,19 @@ pub struct SessionEntry {
     pub forwards: BTreeMap<ForwardRuleId, ActiveForward>,
 }
 
+/// Result of inspecting runtime entries left by an earlier process.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RecoveryReport {
+    /// Live known masters explicitly stopped during recovery.
+    pub terminated_targets: Vec<TargetId>,
+    /// Known socket paths removed only after a failed `-O check`.
+    pub removed_stale_paths: Vec<std::path::PathBuf>,
+    /// Namespaced paths that could not be mapped to a current target.
+    pub unknown_paths: Vec<std::path::PathBuf>,
+    /// Failures retained for user-visible diagnostics.
+    pub failures: Vec<Failure>,
+}
+
 /// Side-effect-free port availability boundary used before asking OpenSSH.
 pub trait PortProbe {
     /// Returns `true` when a temporary bind succeeds and `false` for a conflict.
@@ -452,6 +465,80 @@ impl<B: SshClient, P: PortProbe> SessionManager<B, P> {
             .into_iter()
             .filter_map(|target_id| self.disconnect(&target_id).err())
             .collect()
+    }
+
+    /// Recovers known runtime entries without deleting an unchecked live master.
+    pub fn recover_previous_runtime(&mut self) -> Result<RecoveryReport, ManagerError> {
+        let owned_paths = self.runtime.owned_control_paths()?;
+        let mut report = RecoveryReport::default();
+
+        for index in 0..self.entries.len() {
+            let entry = &mut self.entries[index];
+            if !owned_paths.contains(&entry.session.control_path) {
+                continue;
+            }
+
+            let check = match self
+                .ssh
+                .check(&entry.target.host_alias, &entry.session.control_path)
+            {
+                Ok(output) => output,
+                Err(error) => {
+                    let failure =
+                        failure_from_ssh_error(error, "残存ControlMasterを確認できません");
+                    move_session_to_failed(&mut entry.session, failure.clone())?;
+                    report.failures.push(failure);
+                    continue;
+                }
+            };
+
+            if check.success {
+                move_session_to_connected(&mut entry.session)?;
+                let exit = match self
+                    .ssh
+                    .disconnect(&entry.target.host_alias, &entry.session.control_path)
+                {
+                    Ok(output) => output,
+                    Err(error) => {
+                        let failure =
+                            failure_from_ssh_error(error, "残存SSHセッションを終了できません");
+                        move_session_to_failed(&mut entry.session, failure.clone())?;
+                        report.failures.push(failure);
+                        continue;
+                    }
+                };
+                if exit.success {
+                    move_session_to_disconnected(&mut entry.session)?;
+                    report.terminated_targets.push(entry.target.id.clone());
+                } else {
+                    let failure = Failure::new(
+                        FailureKind::ControlMasterUnavailable,
+                        "残存SSHセッションの終了に失敗しました",
+                        exit.diagnostic().map(str::to_owned),
+                    );
+                    move_session_to_failed(&mut entry.session, failure.clone())?;
+                    report.failures.push(failure);
+                }
+            } else {
+                move_session_to_disconnected(&mut entry.session)?;
+                self.runtime
+                    .remove_stale_control_path(&entry.session.control_path)?;
+                report
+                    .removed_stale_paths
+                    .push(entry.session.control_path.clone());
+            }
+        }
+
+        report.unknown_paths = owned_paths
+            .into_iter()
+            .filter(|path| {
+                !self
+                    .entries
+                    .iter()
+                    .any(|entry| entry.session.control_path == *path)
+            })
+            .collect();
+        Ok(report)
     }
 
     /// Runtime directory used by this manager.
@@ -933,6 +1020,58 @@ mod tests {
         assert_eq!(
             entry.forwards[&ForwardRuleId::new("web")].state,
             ForwardState::Inactive
+        );
+    }
+
+    #[test]
+    fn recovery_checks_before_removing_a_stale_socket() {
+        let test_runtime = TestRuntime::new();
+        let mut ssh = FakeSsh::default();
+        ssh.check.get_mut().push_back(failure("no master"));
+        let mut manager = SessionManager::with_port_probe(
+            ssh,
+            test_runtime.runtime(),
+            vec![target()],
+            FakePortProbe::default(),
+        )
+        .unwrap();
+        let control_path = manager.entries()[0].session.control_path.clone();
+        fs::write(&control_path, "stale").unwrap();
+
+        let report = manager.recover_previous_runtime().unwrap();
+
+        assert_eq!(report.removed_stale_paths.len(), 1);
+        assert_eq!(report.removed_stale_paths[0], control_path);
+        assert!(!control_path.exists());
+    }
+
+    #[test]
+    fn recovery_stops_a_live_known_master_and_keeps_unknown_paths() {
+        let test_runtime = TestRuntime::new();
+        let mut ssh = FakeSsh::default();
+        ssh.check.get_mut().push_back(success());
+        ssh.disconnect.get_mut().push_back(success());
+        let mut manager = SessionManager::with_port_probe(
+            ssh,
+            test_runtime.runtime(),
+            vec![target()],
+            FakePortProbe::default(),
+        )
+        .unwrap();
+        let known = manager.entries()[0].session.control_path.clone();
+        let unknown = manager.runtime().path().join("cm-unknown");
+        fs::write(&known, "live placeholder").unwrap();
+        fs::write(&unknown, "unknown placeholder").unwrap();
+
+        let report = manager.recover_previous_runtime().unwrap();
+
+        assert_eq!(report.terminated_targets, [TargetId::new("dev")]);
+        assert_eq!(report.unknown_paths.len(), 1);
+        assert_eq!(report.unknown_paths[0], unknown);
+        assert!(unknown.exists());
+        assert!(
+            known.exists(),
+            "the fake ssh does not remove its placeholder"
         );
     }
 

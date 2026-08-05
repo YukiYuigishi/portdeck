@@ -1,0 +1,29 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    name: Format, lint, and test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Show Rust toolchain
+        run: |
+          rustup show active-toolchain
+          rustc --version
+          cargo --version
+
+      - name: Run linters
+        run: ./scripts/lint.sh
+
+      - name: Run tests
+        run: cargo test --all-targets --all-features

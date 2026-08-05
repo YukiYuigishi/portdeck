@@ -68,6 +68,13 @@ fn run_tui(version: &str) -> Result<()> {
     let mut sessions = SessionManager::new(OpenSsh::default(), runtime, targets)?;
     let openssh_version = sessions.probe_openssh()?;
     tracing::info!(openssh_version, "OpenSSH capability probe succeeded");
+    let config_failures = sessions.resolve_target_configs();
+    if !config_failures.is_empty() {
+        tracing::warn!(
+            failures = config_failures.len(),
+            "some effective SSH configurations could not be resolved"
+        );
+    }
 
     let recovery = sessions.recover_previous_runtime()?;
     tracing::info!(

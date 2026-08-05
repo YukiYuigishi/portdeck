@@ -6,7 +6,7 @@ use std::net::TcpListener;
 
 use thiserror::Error;
 
-use crate::config::{RuleStore, StoreError};
+use crate::config::{EffectiveSshConfig, RuleStore, StoreError, parse_effective_config};
 use crate::domain::{
     ActiveForward, Failure, FailureKind, ForwardRule, ForwardRuleId, ForwardState, Session,
     SessionState, Target, TargetId, TransitionError,
@@ -338,6 +338,8 @@ pub struct SessionEntry {
     pub target: Target,
     /// Portdeck-owned ControlMaster state.
     pub session: Session,
+    /// Display-oriented effective values resolved by `ssh -G`.
+    pub effective_config: Option<EffectiveSshConfig>,
     /// Runtime states keyed by saved rule ID.
     pub forwards: BTreeMap<ForwardRuleId, ActiveForward>,
 }
@@ -420,6 +422,7 @@ impl<B: SshClient, P: PortProbe> SessionManager<B, P> {
                 Ok(SessionEntry {
                     target,
                     session,
+                    effective_config: None,
                     forwards: BTreeMap::new(),
                 })
             })
@@ -470,6 +473,45 @@ impl<B: SshClient, P: PortProbe> SessionManager<B, P> {
                 None,
             ))
         })
+    }
+
+    /// Resolves display fields for every target using OpenSSH itself.
+    pub fn resolve_target_configs(&mut self) -> Vec<Failure> {
+        let mut failures = Vec::new();
+        for entry in &mut self.entries {
+            let output = match self.ssh.resolve_config(&entry.target.host_alias) {
+                Ok(output) => output,
+                Err(error) => {
+                    let failure = failure_from_ssh_error(error, "SSH設定を解決できません");
+                    entry.session.last_error = Some(failure.clone());
+                    failures.push(failure);
+                    continue;
+                }
+            };
+            if !output.success {
+                let failure = Failure::new(
+                    FailureKind::SshConfigurationFailed,
+                    format!("{} のSSH設定を解決できません", entry.target.host_alias),
+                    output.diagnostic().map(str::to_owned),
+                );
+                entry.session.last_error = Some(failure.clone());
+                failures.push(failure);
+                continue;
+            }
+            match parse_effective_config(&output.stdout) {
+                Ok(config) => entry.effective_config = Some(config),
+                Err(error) => {
+                    let failure = Failure::new(
+                        FailureKind::SshConfigurationFailed,
+                        format!("{} のssh -G出力を解析できません", entry.target.host_alias),
+                        Some(error.to_string()),
+                    );
+                    entry.session.last_error = Some(failure.clone());
+                    failures.push(failure);
+                }
+            }
+        }
+        failures
     }
 
     /// Connects one target, confirming success with `-O check`.
@@ -1053,7 +1095,11 @@ mod tests {
         }
 
         fn resolve_config(&self, _host_alias: &str) -> Result<SshOutput, SshError> {
-            Ok(success())
+            Ok(SshOutput {
+                stdout: "host dev\nhostname dev.example.test\nuser alice\nport 2222\nproxyjump bastion\n"
+                    .to_owned(),
+                ..success()
+            })
         }
 
         fn connect(&self, _host_alias: &str, _control_path: &Path) -> Result<SshOutput, SshError> {
@@ -1201,6 +1247,26 @@ mod tests {
             manager.entry(&TargetId::new("dev")).unwrap().session.state,
             SessionState::Connected
         );
+    }
+
+    #[test]
+    fn effective_target_values_are_resolved_by_openssh_output() {
+        let test_runtime = TestRuntime::new();
+        let mut manager = SessionManager::with_port_probe(
+            FakeSsh::successful(),
+            test_runtime.runtime(),
+            vec![target()],
+            FakePortProbe::default(),
+        )
+        .unwrap();
+
+        assert!(manager.resolve_target_configs().is_empty());
+
+        let config = manager.entries()[0].effective_config.as_ref().unwrap();
+        assert_eq!(config.hostname, "dev.example.test");
+        assert_eq!(config.user, "alice");
+        assert_eq!(config.port, 2222);
+        assert_eq!(config.proxy_jump.as_deref(), Some("bastion"));
     }
 
     #[test]

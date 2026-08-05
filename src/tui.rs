@@ -673,6 +673,7 @@ impl UiState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct TargetRow {
     alias: String,
+    destination: Option<String>,
     state: SessionState,
     active_forwards: usize,
 }
@@ -737,6 +738,14 @@ fn render_targets<B: SshClient, P: PortProbe>(
         .iter()
         .map(|entry| TargetRow {
             alias: entry.target.host_alias.clone(),
+            destination: entry.effective_config.as_ref().map(|config| {
+                let proxy = config
+                    .proxy_jump
+                    .as_ref()
+                    .map(|jump| format!(" via {jump}"))
+                    .unwrap_or_default();
+                format!("{}@{}:{}{proxy}", config.user, config.hostname, config.port)
+            }),
             state: entry.session.state,
             active_forwards: entry
                 .forwards
@@ -748,8 +757,13 @@ fn render_targets<B: SshClient, P: PortProbe>(
     let items = target_rows
         .iter()
         .map(|row| {
+            let destination = row
+                .destination
+                .as_ref()
+                .map(|value| format!("  {value}"))
+                .unwrap_or_default();
             ListItem::new(format!(
-                "{} {}  {}  [{}]",
+                "{} {}  {}  [{}]{destination}",
                 session_symbol(row.state),
                 row.alias,
                 session_label(row.state),

@@ -837,18 +837,27 @@ impl<B: SshClient, P: PortProbe> SessionManager<B, P> {
         Ok(())
     }
 
-    /// Stops all known live sessions, returning every failure encountered.
+    /// Checks and stops all known live sessions, returning every failure encountered.
     pub fn shutdown_all(&mut self) -> Vec<ManagerError> {
-        let connected_targets = self
+        let candidate_targets = self
             .entries
             .iter()
             .filter(|entry| entry.session.state != SessionState::Disconnected)
             .map(|entry| entry.target.id.clone())
             .collect::<Vec<_>>();
-        connected_targets
-            .into_iter()
-            .filter_map(|target_id| self.disconnect(&target_id).err())
-            .collect()
+        let mut errors = Vec::new();
+        for target_id in candidate_targets {
+            match self.check(&target_id) {
+                Ok(true) => {
+                    if let Err(error) = self.disconnect(&target_id) {
+                        errors.push(error);
+                    }
+                }
+                Ok(false) => {}
+                Err(error) => errors.push(error),
+            }
+        }
+        errors
     }
 
     /// Recovers known runtime entries without deleting an unchecked live master.
@@ -1326,6 +1335,37 @@ mod tests {
             SessionState::Failed
         );
         assert!(error.to_string().contains("ControlMaster"));
+    }
+
+    #[test]
+    fn shutdown_does_not_fail_when_a_failed_connection_has_no_master() {
+        let test_runtime = TestRuntime::new();
+        let mut ssh = FakeSsh::successful();
+        ssh.connect.get_mut().clear();
+        ssh.connect
+            .get_mut()
+            .push_back(failure("Permission denied"));
+        ssh.check.get_mut().clear();
+        ssh.check
+            .get_mut()
+            .push_back(failure("master is not running"));
+        let mut manager = SessionManager::with_port_probe(
+            ssh,
+            test_runtime.runtime(),
+            vec![target()],
+            FakePortProbe::default(),
+        )
+        .unwrap();
+        manager.connect(&TargetId::new("dev")).unwrap_err();
+
+        let errors = manager.shutdown_all();
+
+        assert!(errors.is_empty());
+        assert_eq!(
+            manager.entry(&TargetId::new("dev")).unwrap().session.state,
+            SessionState::Disconnected
+        );
+        assert_eq!(manager.ssh.disconnect.borrow().len(), 1);
     }
 
     #[test]

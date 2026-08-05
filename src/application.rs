@@ -660,7 +660,10 @@ impl<B: SshClient, P: PortProbe> SessionManager<B, P> {
             .forwards
             .get_mut(&rule.id)
             .ok_or_else(|| ManagerError::UnknownForward(rule.id.clone()))?;
-        if runtime_forward.state != ForwardState::Active {
+        let can_cancel = runtime_forward.state == ForwardState::Active
+            || (runtime_forward.state == ForwardState::Failed
+                && runtime_forward.actual_local_port.is_some());
+        if !can_cancel {
             return Err(ManagerError::InvalidForwardState(runtime_forward.state));
         }
         let actual_port = runtime_forward
@@ -1255,6 +1258,34 @@ mod tests {
         assert_eq!(forward.state, ForwardState::Failed);
         assert_eq!(forward.actual_local_port, Some(8080));
         assert!(forward.normalized_spec.is_some());
+    }
+
+    #[test]
+    fn failed_cancel_can_be_retried_with_the_same_specification() {
+        let test_runtime = TestRuntime::new();
+        let mut ssh = FakeSsh::successful();
+        ssh.forward.get_mut().push_back(success());
+        ssh.cancel
+            .get_mut()
+            .extend([failure("cancel failed"), success()]);
+        let mut manager = SessionManager::with_port_probe(
+            ssh,
+            test_runtime.runtime(),
+            vec![target()],
+            FakePortProbe::default(),
+        )
+        .unwrap();
+        manager.connect(&TargetId::new("dev")).unwrap();
+        manager.activate_forward(&rule()).unwrap();
+        manager.cancel_forward(&rule()).unwrap_err();
+
+        manager.cancel_forward(&rule()).unwrap();
+
+        assert_eq!(
+            manager.entry(&TargetId::new("dev")).unwrap().forwards[&ForwardRuleId::new("web")]
+                .state,
+            ForwardState::Inactive
+        );
     }
 
     #[test]

@@ -3,13 +3,23 @@
 //! The TUI reports user intent and renders application state; it does not
 //! construct or execute OpenSSH commands.
 
+use std::io::{self, Stdout, stdout};
+
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::execute;
+use crossterm::terminal::{
+    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+};
 use ratatui::Frame;
+use ratatui::Terminal;
+use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
+use thiserror::Error;
 
-use crate::application::{AppState, ForwardRuleDraft, PortProbe};
+use crate::application::{AppActionError, AppState, ForwardRuleDraft, ManagerError, PortProbe};
 use crate::domain::{ForwardRuleId, ForwardState, SessionState, TargetId};
 use crate::ssh::SshClient;
 
@@ -138,6 +148,498 @@ pub struct UiState {
     pub pending_draft: Option<ForwardRuleDraft>,
     /// Whether the event loop should stop.
     pub should_quit: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum UiCommand {
+    None,
+    Connect(TargetId),
+    Disconnect(TargetId),
+    Check(TargetId),
+    AddForward(TargetId, ForwardRuleDraft),
+    ActivateForward(ForwardRuleId),
+    CancelForward(ForwardRuleId),
+    DeleteForward(ForwardRuleId),
+    Quit,
+}
+
+/// Terminal setup, event, or restoration failure.
+#[derive(Debug, Error)]
+pub enum TuiError {
+    /// Crossterm or terminal backend I/O failed.
+    #[error("terminal operation failed: {0}")]
+    Io(#[from] io::Error),
+}
+
+type PortdeckTerminal = Terminal<CrosstermBackend<Stdout>>;
+
+struct TerminalGuard {
+    terminal: PortdeckTerminal,
+    active: bool,
+}
+
+impl TerminalGuard {
+    fn enter() -> Result<Self, TuiError> {
+        enable_raw_mode()?;
+        let mut output = stdout();
+        if let Err(error) = execute!(output, EnterAlternateScreen) {
+            let _ = disable_raw_mode();
+            return Err(error.into());
+        }
+        let backend = CrosstermBackend::new(output);
+        let mut terminal = match Terminal::new(backend) {
+            Ok(terminal) => terminal,
+            Err(error) => {
+                let mut output = stdout();
+                let _ = execute!(output, LeaveAlternateScreen);
+                let _ = disable_raw_mode();
+                return Err(error.into());
+            }
+        };
+        terminal.hide_cursor()?;
+        terminal.clear()?;
+        Ok(Self {
+            terminal,
+            active: true,
+        })
+    }
+
+    fn suspend(&mut self) -> Result<(), TuiError> {
+        if !self.active {
+            return Ok(());
+        }
+        self.terminal.show_cursor()?;
+        execute!(self.terminal.backend_mut(), LeaveAlternateScreen)?;
+        disable_raw_mode()?;
+        self.active = false;
+        Ok(())
+    }
+
+    fn resume(&mut self) -> Result<(), TuiError> {
+        if self.active {
+            return Ok(());
+        }
+        enable_raw_mode()?;
+        if let Err(error) = execute!(self.terminal.backend_mut(), EnterAlternateScreen) {
+            let _ = disable_raw_mode();
+            return Err(error.into());
+        }
+        self.terminal.hide_cursor()?;
+        self.terminal.clear()?;
+        self.active = true;
+        Ok(())
+    }
+
+    fn restore(&mut self) -> Result<(), TuiError> {
+        if !self.active {
+            return Ok(());
+        }
+        self.terminal.show_cursor()?;
+        execute!(self.terminal.backend_mut(), LeaveAlternateScreen)?;
+        disable_raw_mode()?;
+        self.active = false;
+        Ok(())
+    }
+}
+
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        if self.active {
+            let _ = self.terminal.show_cursor();
+            let _ = execute!(self.terminal.backend_mut(), LeaveAlternateScreen);
+            let _ = disable_raw_mode();
+            self.active = false;
+        }
+    }
+}
+
+/// Runs the blocking MVP event loop until the user confirms quit.
+pub fn run<B: SshClient, P: PortProbe>(app: &mut AppState<B, P>) -> Result<(), TuiError> {
+    let mut terminal = TerminalGuard::enter()?;
+    let mut ui = UiState::default();
+    ui.clamp(app);
+
+    while !ui.should_quit {
+        terminal.terminal.draw(|frame| render(frame, &ui, app))?;
+        let event = event::read()?;
+        let Event::Key(key) = event else {
+            continue;
+        };
+        if matches!(key.kind, KeyEventKind::Release) {
+            continue;
+        }
+        let command = handle_key(&mut ui, app, key);
+        execute_ui_command(command, &mut ui, app, &mut terminal)?;
+        ui.clamp(app);
+    }
+
+    terminal.restore()
+}
+
+fn handle_key<B: SshClient, P: PortProbe>(
+    ui: &mut UiState,
+    app: &AppState<B, P>,
+    key: KeyEvent,
+) -> UiCommand {
+    match ui.mode.clone() {
+        Mode::Normal => handle_normal_key(ui, app, key),
+        Mode::ForwardForm => handle_form_key(ui, app, key),
+        Mode::PublicBindWarning => handle_public_warning_key(ui, app, key),
+        Mode::Confirm(confirmation) => handle_confirmation_key(ui, key, confirmation),
+        Mode::ErrorDetails => {
+            if matches!(key.code, KeyCode::Esc | KeyCode::Enter | KeyCode::Char('e')) {
+                ui.mode = Mode::Normal;
+            }
+            UiCommand::None
+        }
+    }
+}
+
+fn handle_normal_key<B: SshClient, P: PortProbe>(
+    ui: &mut UiState,
+    app: &AppState<B, P>,
+    key: KeyEvent,
+) -> UiCommand {
+    if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+        return request_quit(ui, app);
+    }
+
+    match key.code {
+        KeyCode::Tab | KeyCode::Left | KeyCode::Right => {
+            ui.focus = match ui.focus {
+                Focus::Targets => Focus::Forwards,
+                Focus::Forwards => Focus::Targets,
+            };
+            UiCommand::None
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            move_selection(ui, app, false);
+            UiCommand::None
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            move_selection(ui, app, true);
+            UiCommand::None
+        }
+        KeyCode::Char('c') => selected_target_id(ui, app)
+            .cloned()
+            .map(UiCommand::Connect)
+            .unwrap_or(UiCommand::None),
+        KeyCode::Char('d') => {
+            if let Some(target_id) = selected_target_id(ui, app).cloned() {
+                ui.mode = Mode::Confirm(Confirmation::Disconnect(target_id));
+            }
+            UiCommand::None
+        }
+        KeyCode::Char('a') => {
+            if selected_target_id(ui, app).is_some() {
+                ui.form = ForwardForm::default();
+                ui.mode = Mode::ForwardForm;
+            }
+            UiCommand::None
+        }
+        KeyCode::Char(' ') => selected_forward_command(ui, app),
+        KeyCode::Char('D') => {
+            if let Some(rule_id) = selected_rule_id(ui, app).cloned() {
+                ui.mode = Mode::Confirm(Confirmation::DeleteForward(rule_id));
+            }
+            UiCommand::None
+        }
+        KeyCode::Char('r') => selected_target_id(ui, app)
+            .cloned()
+            .map(UiCommand::Check)
+            .unwrap_or(UiCommand::None),
+        KeyCode::Char('e') => {
+            if ui.error_detail.is_some() {
+                ui.mode = Mode::ErrorDetails;
+            }
+            UiCommand::None
+        }
+        KeyCode::Char('q') => request_quit(ui, app),
+        _ => UiCommand::None,
+    }
+}
+
+fn handle_form_key<B: SshClient, P: PortProbe>(
+    ui: &mut UiState,
+    app: &AppState<B, P>,
+    key: KeyEvent,
+) -> UiCommand {
+    match key.code {
+        KeyCode::Esc => {
+            ui.mode = Mode::Normal;
+            UiCommand::None
+        }
+        KeyCode::Tab | KeyCode::Down => {
+            ui.form.next_field();
+            UiCommand::None
+        }
+        KeyCode::BackTab | KeyCode::Up => {
+            ui.form.previous_field();
+            UiCommand::None
+        }
+        KeyCode::Backspace => {
+            ui.form.selected_value_mut().pop();
+            UiCommand::None
+        }
+        KeyCode::Char(character)
+            if !key
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+        {
+            ui.form.selected_value_mut().push(character);
+            UiCommand::None
+        }
+        KeyCode::Enter => {
+            let Some(target_id) = selected_target_id(ui, app).cloned() else {
+                ui.mode = Mode::Normal;
+                return UiCommand::None;
+            };
+            match ui.form.draft() {
+                Ok(draft) if draft.public_bind => {
+                    ui.pending_draft = Some(draft);
+                    ui.mode = Mode::PublicBindWarning;
+                    UiCommand::None
+                }
+                Ok(draft) => {
+                    ui.form = ForwardForm::default();
+                    ui.mode = Mode::Normal;
+                    UiCommand::AddForward(target_id, draft)
+                }
+                Err(error) => {
+                    set_error(ui, "転送ルールを保存できません", Some(error.to_string()));
+                    UiCommand::None
+                }
+            }
+        }
+        _ => UiCommand::None,
+    }
+}
+
+fn handle_public_warning_key<B: SshClient, P: PortProbe>(
+    ui: &mut UiState,
+    app: &AppState<B, P>,
+    key: KeyEvent,
+) -> UiCommand {
+    match key.code {
+        KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
+            let Some(target_id) = selected_target_id(ui, app).cloned() else {
+                ui.mode = Mode::Normal;
+                ui.pending_draft = None;
+                return UiCommand::None;
+            };
+            let Some(draft) = ui.pending_draft.take() else {
+                ui.mode = Mode::Normal;
+                return UiCommand::None;
+            };
+            ui.form = ForwardForm::default();
+            ui.mode = Mode::Normal;
+            UiCommand::AddForward(target_id, draft)
+        }
+        KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
+            ui.pending_draft = None;
+            ui.mode = Mode::ForwardForm;
+            UiCommand::None
+        }
+        _ => UiCommand::None,
+    }
+}
+
+fn handle_confirmation_key(
+    ui: &mut UiState,
+    key: KeyEvent,
+    confirmation: Confirmation,
+) -> UiCommand {
+    match key.code {
+        KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
+            ui.mode = Mode::Normal;
+            match confirmation {
+                Confirmation::Disconnect(target_id) => UiCommand::Disconnect(target_id),
+                Confirmation::DeleteForward(rule_id) => UiCommand::DeleteForward(rule_id),
+                Confirmation::Quit => UiCommand::Quit,
+            }
+        }
+        KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
+            ui.mode = Mode::Normal;
+            UiCommand::None
+        }
+        _ => UiCommand::None,
+    }
+}
+
+fn execute_ui_command<B: SshClient, P: PortProbe>(
+    command: UiCommand,
+    ui: &mut UiState,
+    app: &mut AppState<B, P>,
+    terminal: &mut TerminalGuard,
+) -> Result<(), TuiError> {
+    match command {
+        UiCommand::None => {}
+        UiCommand::Connect(target_id) => {
+            ui.status = "OpenSSHへ端末を引き渡します…".to_owned();
+            terminal.suspend()?;
+            let result = app.sessions_mut().connect(&target_id);
+            terminal.resume()?;
+            match result {
+                Ok(()) => set_success(ui, "SSH接続を開始しました"),
+                Err(error) => set_manager_error(ui, &error),
+            }
+        }
+        UiCommand::Disconnect(target_id) => match app.sessions_mut().disconnect(&target_id) {
+            Ok(()) => set_success(ui, "SSHセッションを終了しました"),
+            Err(error) => set_manager_error(ui, &error),
+        },
+        UiCommand::Check(target_id) => match app.sessions_mut().check(&target_id) {
+            Ok(true) => set_success(ui, "ControlMasterは接続中です"),
+            Ok(false) => {
+                ui.status = "ControlMasterは接続されていません".to_owned();
+                ui.error_detail = selected_session_error(ui, app);
+            }
+            Err(error) => set_manager_error(ui, &error),
+        },
+        UiCommand::AddForward(target_id, draft) => match app.add_rule(&target_id, draft) {
+            Ok(_) => set_success(ui, "転送ルールを保存しました（未有効）"),
+            Err(error) => set_error(ui, "転送ルールを保存できません", Some(error.to_string())),
+        },
+        UiCommand::ActivateForward(rule_id) => match app.activate_rule(&rule_id) {
+            Ok(port) => set_success(ui, &format!("ローカル側port {port} で転送を開始しました")),
+            Err(error) => set_action_error(ui, &error),
+        },
+        UiCommand::CancelForward(rule_id) => match app.cancel_rule(&rule_id) {
+            Ok(()) => set_success(ui, "転送を取消しました（定義は保存済み）"),
+            Err(error) => set_action_error(ui, &error),
+        },
+        UiCommand::DeleteForward(rule_id) => {
+            let needs_cancel =
+                runtime_forward(ui, app).is_some_and(|runtime| runtime.actual_local_port.is_some());
+            if needs_cancel && let Err(error) = app.cancel_rule(&rule_id) {
+                set_action_error(ui, &error);
+                return Ok(());
+            }
+            match app.remove_rule(&rule_id) {
+                Ok(()) => set_success(ui, "保存済み転送ルールを削除しました"),
+                Err(error) => set_action_error(ui, &error),
+            }
+        }
+        UiCommand::Quit => ui.should_quit = true,
+    }
+    Ok(())
+}
+
+fn move_selection<B: SshClient, P: PortProbe>(
+    ui: &mut UiState,
+    app: &AppState<B, P>,
+    forward: bool,
+) {
+    match ui.focus {
+        Focus::Targets => {
+            let count = app.sessions().entries().len();
+            ui.selected_target = wrapped_index(ui.selected_target, count, forward);
+            ui.selected_forward = 0;
+        }
+        Focus::Forwards => {
+            let count = selected_target_id(ui, app)
+                .map(|target_id| app.rules_for(target_id).len())
+                .unwrap_or(0);
+            ui.selected_forward = wrapped_index(ui.selected_forward, count, forward);
+        }
+    }
+}
+
+fn selected_forward_command<B: SshClient, P: PortProbe>(
+    ui: &UiState,
+    app: &AppState<B, P>,
+) -> UiCommand {
+    let Some(rule_id) = selected_rule_id(ui, app).cloned() else {
+        return UiCommand::None;
+    };
+    if runtime_forward(ui, app).is_some_and(|runtime| runtime.actual_local_port.is_some()) {
+        UiCommand::CancelForward(rule_id)
+    } else {
+        UiCommand::ActivateForward(rule_id)
+    }
+}
+
+fn request_quit<B: SshClient, P: PortProbe>(ui: &mut UiState, app: &AppState<B, P>) -> UiCommand {
+    let has_live_session = app
+        .sessions()
+        .entries()
+        .iter()
+        .any(|entry| entry.session.state != SessionState::Disconnected);
+    if has_live_session {
+        ui.mode = Mode::Confirm(Confirmation::Quit);
+        UiCommand::None
+    } else {
+        UiCommand::Quit
+    }
+}
+
+fn selected_rule_id<'a, B: SshClient, P: PortProbe>(
+    ui: &UiState,
+    app: &'a AppState<B, P>,
+) -> Option<&'a ForwardRuleId> {
+    let target_id = selected_target_id(ui, app)?;
+    app.rules_for(target_id)
+        .get(ui.selected_forward)
+        .map(|rule| &rule.id)
+}
+
+fn runtime_forward<'a, B: SshClient, P: PortProbe>(
+    ui: &UiState,
+    app: &'a AppState<B, P>,
+) -> Option<&'a crate::domain::ActiveForward> {
+    let target_id = selected_target_id(ui, app)?;
+    let rule_id = selected_rule_id(ui, app)?;
+    app.sessions().entry(target_id)?.forwards.get(rule_id)
+}
+
+fn selected_session_error<B: SshClient, P: PortProbe>(
+    ui: &UiState,
+    app: &AppState<B, P>,
+) -> Option<String> {
+    let target_id = selected_target_id(ui, app)?;
+    app.sessions()
+        .entry(target_id)?
+        .session
+        .last_error
+        .as_ref()
+        .and_then(|failure| failure.detail.clone())
+}
+
+fn set_success(ui: &mut UiState, message: &str) {
+    ui.status = message.to_owned();
+    ui.error_detail = None;
+}
+
+fn set_manager_error(ui: &mut UiState, error: &ManagerError) {
+    match error {
+        ManagerError::Operation(failure) => {
+            set_error(ui, &failure.summary, failure.detail.clone());
+        }
+        _ => set_error(ui, &error.to_string(), Some(error.to_string())),
+    }
+}
+
+fn set_action_error(ui: &mut UiState, error: &AppActionError) {
+    if let AppActionError::Manager(error) = error {
+        set_manager_error(ui, error);
+    } else {
+        set_error(ui, &error.to_string(), Some(error.to_string()));
+    }
+}
+
+fn set_error(ui: &mut UiState, summary: &str, detail: Option<String>) {
+    ui.status = format!("ERROR: {summary}");
+    ui.error_detail = detail;
+}
+
+fn wrapped_index(index: usize, count: usize, forward: bool) -> usize {
+    if count == 0 {
+        0
+    } else if forward {
+        (index + 1) % count
+    } else {
+        index.checked_sub(1).unwrap_or(count - 1)
+    }
 }
 
 impl Default for UiState {
@@ -551,6 +1053,7 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
@@ -559,7 +1062,7 @@ mod tests {
     use crate::runtime::RuntimeDirectory;
     use crate::ssh::{LocalForwardSpec, SshClient, SshError, SshOutput};
 
-    use super::{Focus, Mode, UiState, render};
+    use super::{Confirmation, Focus, Mode, UiCommand, UiState, handle_key, render};
 
     #[derive(Debug, Default)]
     struct FakeSsh {
@@ -724,5 +1227,95 @@ mod tests {
         assert_eq!(ui.form.selected_field, 4);
         ui.form.remote_port = "3000".to_owned();
         assert_eq!(ui.form.draft().unwrap().remote_port, 3000);
+    }
+
+    #[test]
+    fn add_form_event_returns_validated_application_intent() {
+        let fixture = Fixture::new();
+        let mut ui = UiState::default();
+
+        assert_eq!(
+            handle_key(
+                &mut ui,
+                &fixture.app,
+                KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE)
+            ),
+            UiCommand::None
+        );
+        assert_eq!(ui.mode, Mode::ForwardForm);
+        ui.form.remote_port = "5432".to_owned();
+
+        let command = handle_key(
+            &mut ui,
+            &fixture.app,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        );
+
+        assert!(matches!(command, UiCommand::AddForward(_, _)));
+        assert_eq!(ui.mode, Mode::Normal);
+    }
+
+    #[test]
+    fn public_bind_requires_an_extra_confirmation_event() {
+        let fixture = Fixture::new();
+        let mut ui = UiState {
+            mode: Mode::ForwardForm,
+            ..UiState::default()
+        };
+        ui.form.bind_address = "0.0.0.0".to_owned();
+        ui.form.remote_port = "3000".to_owned();
+
+        let first = handle_key(
+            &mut ui,
+            &fixture.app,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        );
+        assert_eq!(first, UiCommand::None);
+        assert_eq!(ui.mode, Mode::PublicBindWarning);
+
+        let confirmed = handle_key(
+            &mut ui,
+            &fixture.app,
+            KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE),
+        );
+        assert!(matches!(confirmed, UiCommand::AddForward(_, _)));
+    }
+
+    #[test]
+    fn destructive_events_enter_confirmation_before_returning_intent() {
+        let fixture = Fixture::new();
+        let mut ui = UiState::default();
+
+        let first = handle_key(
+            &mut ui,
+            &fixture.app,
+            KeyEvent::new(KeyCode::Char('D'), KeyModifiers::SHIFT),
+        );
+        assert_eq!(first, UiCommand::None);
+        assert!(matches!(
+            ui.mode,
+            Mode::Confirm(Confirmation::DeleteForward(_))
+        ));
+
+        let confirmed = handle_key(
+            &mut ui,
+            &fixture.app,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        );
+        assert!(matches!(confirmed, UiCommand::DeleteForward(_)));
+    }
+
+    #[test]
+    fn error_detail_mode_opens_only_when_detail_exists() {
+        let fixture = Fixture::new();
+        let mut ui = UiState::default();
+        let key = KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE);
+
+        handle_key(&mut ui, &fixture.app, key);
+        assert_eq!(ui.mode, Mode::Normal);
+
+        ui.error_detail = Some("OpenSSH stderr".to_owned());
+        handle_key(&mut ui, &fixture.app, key);
+        assert_eq!(ui.mode, Mode::ErrorDetails);
     }
 }

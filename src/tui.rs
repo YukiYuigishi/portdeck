@@ -8,10 +8,12 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use crossterm::cursor::MoveTo;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::execute;
 use crossterm::terminal::{
-    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+    Clear as TerminalClear, ClearType, EnterAlternateScreen, LeaveAlternateScreen,
+    disable_raw_mode, enable_raw_mode,
 };
 use ratatui::Frame;
 use ratatui::Terminal;
@@ -211,7 +213,11 @@ impl TerminalGuard {
             }
         };
         terminal.hide_cursor()?;
-        terminal.clear()?;
+        execute!(
+            terminal.backend_mut(),
+            TerminalClear(ClearType::All),
+            MoveTo(0, 0)
+        )?;
         Ok(Self {
             terminal,
             active: true,
@@ -239,7 +245,11 @@ impl TerminalGuard {
             return Err(error.into());
         }
         self.terminal.hide_cursor()?;
-        self.terminal.clear()?;
+        execute!(
+            self.terminal.backend_mut(),
+            TerminalClear(ClearType::All),
+            MoveTo(0, 0)
+        )?;
         self.active = true;
         Ok(())
     }

@@ -5,6 +5,8 @@
 
 pub mod config;
 pub mod domain;
+pub mod error;
+pub mod logging;
 pub mod runtime;
 pub mod ssh;
 pub mod tui;

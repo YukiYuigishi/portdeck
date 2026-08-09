@@ -17,7 +17,7 @@ use crossterm::terminal::{
 };
 use ratatui::Frame;
 use ratatui::Terminal;
-use ratatui::backend::CrosstermBackend;
+use ratatui::backend::{Backend, CrosstermBackend};
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -250,6 +250,7 @@ impl TerminalGuard {
             TerminalClear(ClearType::All),
             MoveTo(0, 0)
         )?;
+        invalidate_previous_frame(&mut self.terminal);
         self.active = true;
         Ok(())
     }
@@ -264,6 +265,13 @@ impl TerminalGuard {
         self.active = false;
         Ok(())
     }
+}
+
+fn invalidate_previous_frame<B: Backend>(terminal: &mut Terminal<B>) {
+    // Leaving and re-entering the alternate screen discards its visible contents,
+    // while ratatui still remembers the last frame. Reset that comparison frame
+    // so the next draw writes every cell instead of only the state differences.
+    terminal.swap_buffers();
 }
 
 impl Drop for TerminalGuard {
@@ -1126,14 +1134,17 @@ mod tests {
 
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use ratatui::Terminal;
-    use ratatui::backend::TestBackend;
+    use ratatui::backend::{Backend, TestBackend};
 
     use crate::application::{AppState, ForwardRuleDraft, PortProbe, SessionManager};
     use crate::domain::{Target, TargetId};
     use crate::runtime::RuntimeDirectory;
     use crate::ssh::{LocalForwardSpec, SshClient, SshError, SshOutput};
 
-    use super::{Confirmation, Focus, Mode, UiCommand, UiState, handle_key, render};
+    use super::{
+        Confirmation, Focus, Mode, UiCommand, UiState, handle_key, invalidate_previous_frame,
+        render,
+    };
 
     #[derive(Debug, Default)]
     struct FakeSsh {
@@ -1269,6 +1280,29 @@ mod tests {
         assert!(contents.contains("127.0.0.1:8080"));
         assert!(contents.contains("127.0.0.1:3000"));
         assert!(contents.contains("Inactive"));
+    }
+
+    #[test]
+    fn invalidating_after_external_clear_forces_an_identical_frame_to_redraw() {
+        let mut terminal = Terminal::new(TestBackend::new(12, 2)).unwrap();
+        terminal
+            .draw(|frame| frame.render_widget("unchanged", frame.area()))
+            .unwrap();
+        terminal.backend_mut().clear().unwrap();
+
+        invalidate_previous_frame(&mut terminal);
+        terminal
+            .draw(|frame| frame.render_widget("unchanged", frame.area()))
+            .unwrap();
+
+        let contents = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect::<String>();
+        assert!(contents.contains("unchanged"));
     }
 
     #[test]

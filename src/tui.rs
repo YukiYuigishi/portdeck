@@ -27,7 +27,9 @@ use signal_hook::flag;
 use thiserror::Error;
 
 use crate::application::{AppActionError, AppState, ForwardRuleDraft, ManagerError, PortProbe};
-use crate::domain::{ForwardRule, ForwardRuleId, ForwardState, SessionState, TargetId};
+use crate::domain::{
+    ForwardKind, ForwardRule, ForwardRuleId, ForwardState, SessionState, TargetId,
+};
 use crate::ssh::SshClient;
 
 /// Pane receiving navigation keys.
@@ -68,10 +70,30 @@ pub enum Mode {
 }
 
 /// Editable forward-rule form.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ForwardFormKind {
+    /// Fixed remote destination (`ssh -L`).
+    Local,
+    /// OpenSSH SOCKS listener (`ssh -D`).
+    Socks,
+}
+
+impl ForwardFormKind {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Local => "Local",
+            Self::Socks => "SOCKS",
+        }
+    }
+}
+
+/// Editable forward-rule form.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ForwardForm {
     /// Zero-based active field.
     pub selected_field: usize,
+    /// Explicit OpenSSH forwarding capability.
+    pub kind: ForwardFormKind,
     /// Optional label.
     pub label: String,
     /// Local bind address, loopback by default.
@@ -88,6 +110,7 @@ impl Default for ForwardForm {
     fn default() -> Self {
         Self {
             selected_field: 0,
+            kind: ForwardFormKind::Local,
             label: String::new(),
             bind_address: "127.0.0.1".to_owned(),
             local_port: String::new(),
@@ -98,37 +121,62 @@ impl Default for ForwardForm {
 }
 
 impl ForwardForm {
-    const FIELD_COUNT: usize = 5;
+    fn field_count(&self) -> usize {
+        match self.kind {
+            ForwardFormKind::Local => 6,
+            ForwardFormKind::Socks => 4,
+        }
+    }
 
     /// Prefills the shared add/edit form from one saved definition.
     pub fn from_rule(rule: &ForwardRule) -> Self {
+        let (kind, remote_host, remote_port) = match &rule.kind {
+            ForwardKind::Local {
+                remote_host,
+                remote_port,
+            } => (
+                ForwardFormKind::Local,
+                remote_host.clone(),
+                remote_port.to_string(),
+            ),
+            ForwardKind::Socks => (ForwardFormKind::Socks, String::new(), String::new()),
+        };
         Self {
             selected_field: 0,
+            kind,
             label: rule.label.clone().unwrap_or_default(),
             bind_address: rule.bind_address.clone(),
             local_port: rule
                 .requested_local_port
                 .map(|port| port.to_string())
-                .unwrap_or_default(),
-            remote_host: rule.remote_host.clone(),
-            remote_port: rule.remote_port.to_string(),
+                .unwrap_or_else(|| match kind {
+                    ForwardFormKind::Local => String::new(),
+                    ForwardFormKind::Socks => "1080".to_owned(),
+                }),
+            remote_host,
+            remote_port,
         }
     }
 
     /// Parses the current values using application validation.
     pub fn draft(&self) -> Result<ForwardRuleDraft, crate::application::RuleError> {
-        ForwardRuleDraft::parse(
-            &self.label,
-            &self.bind_address,
-            &self.local_port,
-            &self.remote_host,
-            &self.remote_port,
-        )
+        match self.kind {
+            ForwardFormKind::Local => ForwardRuleDraft::parse(
+                &self.label,
+                &self.bind_address,
+                &self.local_port,
+                &self.remote_host,
+                &self.remote_port,
+            ),
+            ForwardFormKind::Socks => {
+                ForwardRuleDraft::parse_socks(&self.label, &self.bind_address, &self.local_port)
+            }
+        }
     }
 
     /// Moves to the next field.
     pub fn next_field(&mut self) {
-        self.selected_field = (self.selected_field + 1) % Self::FIELD_COUNT;
+        self.selected_field = (self.selected_field + 1) % self.field_count();
     }
 
     /// Moves to the previous field.
@@ -136,18 +184,35 @@ impl ForwardForm {
         self.selected_field = self
             .selected_field
             .checked_sub(1)
-            .unwrap_or(Self::FIELD_COUNT - 1);
+            .unwrap_or(self.field_count() - 1);
     }
 
     /// Mutable text of the active field.
-    pub fn selected_value_mut(&mut self) -> &mut String {
+    pub fn selected_value_mut(&mut self) -> Option<&mut String> {
         match self.selected_field {
-            0 => &mut self.label,
-            1 => &mut self.bind_address,
-            2 => &mut self.local_port,
-            3 => &mut self.remote_host,
-            _ => &mut self.remote_port,
+            0 => None,
+            1 => Some(&mut self.label),
+            2 => Some(&mut self.bind_address),
+            3 => Some(&mut self.local_port),
+            4 => Some(&mut self.remote_host),
+            _ => Some(&mut self.remote_port),
         }
+    }
+
+    fn set_kind(&mut self, kind: ForwardFormKind) {
+        self.kind = kind;
+        if kind == ForwardFormKind::Socks && self.local_port.is_empty() {
+            self.local_port = "1080".to_owned();
+        }
+        self.selected_field = self.selected_field.min(self.field_count() - 1);
+    }
+
+    fn toggle_kind(&mut self) {
+        let kind = match self.kind {
+            ForwardFormKind::Local => ForwardFormKind::Socks,
+            ForwardFormKind::Socks => ForwardFormKind::Local,
+        };
+        self.set_kind(kind);
     }
 }
 
@@ -527,8 +592,22 @@ fn handle_form_key<B: SshClient, P: PortProbe>(
             ui.form.previous_field();
             UiCommand::None
         }
+        KeyCode::Left | KeyCode::Right | KeyCode::Char(' ') if ui.form.selected_field == 0 => {
+            ui.form.toggle_kind();
+            UiCommand::None
+        }
         KeyCode::Backspace => {
-            ui.form.selected_value_mut().pop();
+            if let Some(value) = ui.form.selected_value_mut() {
+                value.pop();
+            }
+            UiCommand::None
+        }
+        KeyCode::Char('l' | 'L') if ui.form.selected_field == 0 => {
+            ui.form.set_kind(ForwardFormKind::Local);
+            UiCommand::None
+        }
+        KeyCode::Char('s' | 'S') if ui.form.selected_field == 0 => {
+            ui.form.set_kind(ForwardFormKind::Socks);
             UiCommand::None
         }
         KeyCode::Char(character)
@@ -536,7 +615,9 @@ fn handle_form_key<B: SshClient, P: PortProbe>(
                 .modifiers
                 .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
         {
-            ui.form.selected_value_mut().push(character);
+            if let Some(value) = ui.form.selected_value_mut() {
+                value.push(character);
+            }
             UiCommand::None
         }
         KeyCode::Enter => {
@@ -926,9 +1007,10 @@ struct ForwardRow {
     label: String,
     state: ForwardState,
     local: String,
-    remote: String,
+    remote: Option<String>,
     local_port: u16,
-    remote_port: u16,
+    remote_port: Option<u16>,
+    kind: ForwardFormKind,
 }
 
 /// Renders the complete current application state.
@@ -1054,23 +1136,41 @@ fn render_forwards<B: SshClient, P: PortProbe>(
         .iter()
         .map(|row| {
             if area.width < 60 {
-                ListItem::new(format!(
-                    "{} {}→{} {} {}",
-                    forward_symbol(row.state),
-                    row.local_port,
-                    row.remote_port,
-                    row.label,
-                    forward_label(row.state)
-                ))
+                match row.kind {
+                    ForwardFormKind::Local => ListItem::new(format!(
+                        "{} {}→{} {} {}",
+                        forward_symbol(row.state),
+                        row.local_port,
+                        row.remote_port.expect("Local rows have remote ports"),
+                        row.label,
+                        forward_label(row.state)
+                    )),
+                    ForwardFormKind::Socks => ListItem::new(format!(
+                        "{} SOCKS {} {} {}",
+                        forward_symbol(row.state),
+                        row.local_port,
+                        row.label,
+                        forward_label(row.state)
+                    )),
+                }
             } else {
-                ListItem::new(format!(
-                    "{} {}  {} → {}  {}",
-                    forward_symbol(row.state),
-                    row.label,
-                    row.local,
-                    row.remote,
-                    forward_label(row.state)
-                ))
+                match &row.remote {
+                    Some(remote) => ListItem::new(format!(
+                        "{} {}  {} → {}  {}",
+                        forward_symbol(row.state),
+                        row.label,
+                        row.local,
+                        remote,
+                        forward_label(row.state)
+                    )),
+                    None => ListItem::new(format!(
+                        "{} {}  SOCKS {}  {}",
+                        forward_symbol(row.state),
+                        row.label,
+                        row.local,
+                        forward_label(row.state)
+                    )),
+                }
             }
         })
         .collect::<Vec<_>>();
@@ -1103,8 +1203,18 @@ fn forward_rows<B: SshClient, P: PortProbe>(ui: &UiState, app: &AppState<B, P>) 
                 .unwrap_or(ForwardState::Inactive);
             let local_port = runtime
                 .and_then(|forward| forward.actual_local_port)
-                .or(rule.requested_local_port)
-                .unwrap_or(rule.remote_port);
+                .unwrap_or_else(|| rule.default_local_port());
+            let (kind, remote, remote_port) = match &rule.kind {
+                ForwardKind::Local {
+                    remote_host,
+                    remote_port,
+                } => (
+                    ForwardFormKind::Local,
+                    Some(display_endpoint(remote_host, *remote_port)),
+                    Some(*remote_port),
+                ),
+                ForwardKind::Socks => (ForwardFormKind::Socks, None, None),
+            };
             ForwardRow {
                 label: rule
                     .label
@@ -1112,9 +1222,10 @@ fn forward_rows<B: SshClient, P: PortProbe>(ui: &UiState, app: &AppState<B, P>) 
                     .unwrap_or_else(|| rule.id.as_str().to_owned()),
                 state,
                 local: display_endpoint(&rule.bind_address, local_port),
-                remote: display_endpoint(&rule.remote_host, rule.remote_port),
+                remote,
                 local_port,
-                remote_port: rule.remote_port,
+                remote_port,
+                kind,
             }
         })
         .collect()
@@ -1161,13 +1272,18 @@ fn render_modal(frame: &mut Frame<'_>, area: Rect, ui: &UiState) {
         Mode::Normal => {}
         Mode::TargetSearch => {}
         Mode::ForwardForm => render_forward_form(frame, area, ui),
-        Mode::PublicBindWarning => render_message_modal(
-            frame,
-            area,
-            " Public bind warning ",
-            "このbind addressはローカル側の他ホストへ公開される可能性があります。\n\n続行しますか？ [y/N]",
-            Color::Red,
-        ),
+        Mode::PublicBindWarning => {
+            let message = if ui
+                .pending_draft
+                .as_ref()
+                .is_some_and(|draft| draft.kind == ForwardKind::Socks)
+            {
+                "警告: 認証のないSOCKS proxyがローカル側の他ホストへ公開されます。\n接続可能な利用者はSSH経由で任意の宛先へ通信できます。\n\n続行しますか？ [y/N]"
+            } else {
+                "このbind addressはローカル側の他ホストへ公開される可能性があります。\n\n続行しますか？ [y/N]"
+            };
+            render_message_modal(frame, area, " Public bind warning ", message, Color::Red)
+        }
         Mode::Confirm(action) => {
             let message = match action {
                 Confirmation::Disconnect(_) => {
@@ -1195,13 +1311,18 @@ fn render_modal(frame: &mut Frame<'_>, area: Rect, ui: &UiState) {
 fn render_forward_form(frame: &mut Frame<'_>, area: Rect, ui: &UiState) {
     let modal = centered_rect(72, 16, area);
     frame.render_widget(Clear, modal);
-    let fields = [
+    let mut fields = vec![
+        ("Forward kind (←/→)", ui.form.kind.label()),
         ("Label (optional)", ui.form.label.as_str()),
         ("Local bind address", ui.form.bind_address.as_str()),
         ("Preferred local port", ui.form.local_port.as_str()),
-        ("Remote destination host", ui.form.remote_host.as_str()),
-        ("Remote destination port *", ui.form.remote_port.as_str()),
     ];
+    if ui.form.kind == ForwardFormKind::Local {
+        fields.extend([
+            ("Remote destination host", ui.form.remote_host.as_str()),
+            ("Remote destination port *", ui.form.remote_port.as_str()),
+        ]);
+    }
     let lines = fields
         .iter()
         .enumerate()
@@ -1394,9 +1515,9 @@ mod tests {
     use ratatui::backend::{Backend, TestBackend};
 
     use crate::application::{AppState, ForwardRuleDraft, PortProbe, SessionManager};
-    use crate::domain::{ForwardRuleId, Target, TargetId};
+    use crate::domain::{ForwardKind, ForwardRuleId, Target, TargetId};
     use crate::runtime::RuntimeDirectory;
-    use crate::ssh::{LocalForwardSpec, SshClient, SshError, SshOutput};
+    use crate::ssh::{DynamicForwardSpec, LocalForwardSpec, SshClient, SshError, SshOutput};
 
     use super::{
         Confirmation, Focus, ForwardForm, Mode, UiCommand, UiState, handle_key,
@@ -1439,6 +1560,24 @@ mod tests {
             _host_alias: &str,
             _control_path: &Path,
             _forward: &LocalForwardSpec,
+        ) -> Result<SshOutput, SshError> {
+            Ok(success())
+        }
+
+        fn add_dynamic_forward(
+            &self,
+            _host_alias: &str,
+            _control_path: &Path,
+            _forward: &DynamicForwardSpec,
+        ) -> Result<SshOutput, SshError> {
+            Ok(success())
+        }
+
+        fn cancel_dynamic_forward(
+            &self,
+            _host_alias: &str,
+            _control_path: &Path,
+            _forward: &DynamicForwardSpec,
         ) -> Result<SshOutput, SshError> {
             Ok(success())
         }
@@ -1609,15 +1748,119 @@ mod tests {
     }
 
     #[test]
+    fn mixed_local_and_socks_rules_render_in_wide_and_narrow_terminals() {
+        let mut fixture = Fixture::new();
+        fixture
+            .app
+            .add_rule(
+                &TargetId::new("dev"),
+                ForwardRuleDraft::parse_socks("browser", "", "").unwrap(),
+            )
+            .unwrap();
+
+        for (width, expected) in [(100, "SOCKS 127.0.0.1:1080"), (50, "SOCKS 1080")] {
+            let mut terminal = Terminal::new(TestBackend::new(width, 12)).unwrap();
+            terminal
+                .draw(|frame| render(frame, &UiState::default(), &fixture.app))
+                .unwrap();
+            let contents = terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(ratatui::buffer::Cell::symbol)
+                .collect::<String>();
+            assert!(contents.contains("8080"));
+            assert!(contents.contains("3000"));
+            assert!(
+                contents.contains(expected),
+                "missing {expected:?} at width {width}"
+            );
+        }
+    }
+
+    #[test]
     fn form_navigation_wraps_and_parses_defaults() {
         let mut ui = UiState {
             mode: Mode::ForwardForm,
             ..UiState::default()
         };
         ui.form.previous_field();
-        assert_eq!(ui.form.selected_field, 4);
+        assert_eq!(ui.form.selected_field, 5);
         ui.form.remote_port = "3000".to_owned();
-        assert_eq!(ui.form.draft().unwrap().remote_port, 3000);
+        assert_eq!(
+            ui.form.draft().unwrap().kind,
+            ForwardKind::Local {
+                remote_host: "127.0.0.1".to_owned(),
+                remote_port: 3000,
+            }
+        );
+    }
+
+    #[test]
+    fn form_selects_socks_with_loopback_1080_and_hides_remote_fields() {
+        let fixture = Fixture::new();
+        let mut ui = UiState {
+            mode: Mode::ForwardForm,
+            ..UiState::default()
+        };
+
+        handle_key(
+            &mut ui,
+            &fixture.app,
+            KeyEvent::new(KeyCode::Right, KeyModifiers::NONE),
+        );
+
+        assert_eq!(ui.form.kind, super::ForwardFormKind::Socks);
+        assert_eq!(ui.form.bind_address, "127.0.0.1");
+        assert_eq!(ui.form.local_port, "1080");
+        assert_eq!(ui.form.field_count(), 4);
+        let draft = ui.form.draft().unwrap();
+        assert_eq!(draft.kind, ForwardKind::Socks);
+        assert_eq!(draft.requested_local_port, Some(1080));
+
+        let mut terminal = Terminal::new(TestBackend::new(100, 18)).unwrap();
+        terminal
+            .draw(|frame| render(frame, &ui, &fixture.app))
+            .unwrap();
+        let contents = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect::<String>();
+        assert!(contents.contains("Forward kind (←/→): SOCKS"));
+        assert!(!contents.contains("Remote destination"));
+    }
+
+    #[test]
+    fn socks_edit_form_preserves_kind_and_listener() {
+        let mut fixture = Fixture::new();
+        fixture
+            .app
+            .add_rule(
+                &TargetId::new("dev"),
+                ForwardRuleDraft::parse_socks("browser", "::1", "1081").unwrap(),
+            )
+            .unwrap();
+        let mut ui = UiState {
+            focus: Focus::Forwards,
+            selected_forward: 1,
+            ..UiState::default()
+        };
+
+        handle_key(
+            &mut ui,
+            &fixture.app,
+            KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE),
+        );
+
+        assert_eq!(ui.form.kind, super::ForwardFormKind::Socks);
+        assert_eq!(ui.form.bind_address, "::1");
+        assert_eq!(ui.form.local_port, "1081");
+        assert_eq!(ui.form.remote_host, "");
+        assert_eq!(ui.form.remote_port, "");
     }
 
     #[test]
@@ -1643,6 +1886,7 @@ mod tests {
             ui.form,
             ForwardForm {
                 selected_field: 0,
+                kind: super::ForwardFormKind::Local,
                 label: "web".to_owned(),
                 bind_address: "127.0.0.1".to_owned(),
                 local_port: "8080".to_owned(),
@@ -1728,8 +1972,13 @@ mod tests {
         assert_eq!(edited.label.as_deref(), Some("edited"));
         assert_eq!(edited.bind_address, "::1");
         assert_eq!(edited.requested_local_port, Some(18080));
-        assert_eq!(edited.remote_host, "web.internal");
-        assert_eq!(edited.remote_port, 4000);
+        assert_eq!(
+            edited.kind,
+            ForwardKind::Local {
+                remote_host: "web.internal".to_owned(),
+                remote_port: 4000,
+            }
+        );
 
         handle_key(
             &mut ui,
@@ -1867,6 +2116,7 @@ mod tests {
             mode: Mode::ForwardForm,
             ..UiState::default()
         };
+        ui.form.selected_field = 1;
 
         for character in ['h', 'l'] {
             handle_key(
@@ -2032,6 +2282,58 @@ mod tests {
         assert_eq!(ui.form.label, "database");
         assert_eq!(ui.form.remote_host, "db");
         assert_eq!(ui.form.remote_port, "5432");
+    }
+
+    #[test]
+    fn mixed_local_and_socks_edit_uses_the_filtered_target() {
+        let mut fixture = Fixture::with_aliases(&["dev-server", "PROD-DB"]);
+        fixture
+            .app
+            .add_rule(
+                &TargetId::new("target-1"),
+                ForwardRuleDraft::parse("database", "", "5432", "db", "5432").unwrap(),
+            )
+            .unwrap();
+        let socks_id = fixture
+            .app
+            .add_rule(
+                &TargetId::new("target-1"),
+                ForwardRuleDraft::parse_socks("browser", "::1", "1081").unwrap(),
+            )
+            .unwrap();
+        let mut ui = UiState {
+            focus: Focus::Forwards,
+            selected_forward: 1,
+            target_filter: "prod".to_owned(),
+            ..UiState::default()
+        };
+
+        handle_key(
+            &mut ui,
+            &fixture.app,
+            KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE),
+        );
+        assert_eq!(ui.editing_rule, Some(socks_id.clone()));
+        assert_eq!(ui.form.kind, super::ForwardFormKind::Socks);
+        assert_eq!(ui.form.bind_address, "::1");
+        assert_eq!(ui.form.local_port, "1081");
+        ui.form.label = "edited proxy".to_owned();
+
+        let UiCommand::UpdateForward(rule_id, draft) = handle_key(
+            &mut ui,
+            &fixture.app,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        ) else {
+            panic!("expected filtered SOCKS update command");
+        };
+        assert_eq!(rule_id, socks_id);
+        assert_eq!(draft.kind, ForwardKind::Socks);
+        fixture.app.update_rule(&rule_id, draft).unwrap();
+
+        let rules = fixture.app.rules_for(&TargetId::new("target-1"));
+        assert!(matches!(rules[0].kind, ForwardKind::Local { .. }));
+        assert_eq!(rules[1].kind, ForwardKind::Socks);
+        assert_eq!(rules[1].label.as_deref(), Some("edited proxy"));
     }
 
     #[test]
@@ -2205,6 +2507,40 @@ mod tests {
             KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE),
         );
         assert!(matches!(confirmed, UiCommand::AddForward(_, _)));
+    }
+
+    #[test]
+    fn public_socks_bind_warns_about_unauthenticated_proxy_access() {
+        let fixture = Fixture::new();
+        let mut ui = UiState {
+            mode: Mode::ForwardForm,
+            ..UiState::default()
+        };
+        ui.form.set_kind(super::ForwardFormKind::Socks);
+        ui.form.bind_address = "0.0.0.0".to_owned();
+
+        assert_eq!(
+            handle_key(
+                &mut ui,
+                &fixture.app,
+                KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            ),
+            UiCommand::None
+        );
+        assert_eq!(ui.mode, Mode::PublicBindWarning);
+        let mut terminal = Terminal::new(TestBackend::new(100, 18)).unwrap();
+        terminal
+            .draw(|frame| render(frame, &ui, &fixture.app))
+            .unwrap();
+        let contents = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect::<String>();
+        assert!(contents.contains("SOCKS proxy"));
+        assert!(contents.contains("任 意 の 宛 先"));
     }
 
     #[test]

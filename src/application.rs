@@ -9,11 +9,11 @@ use thiserror::Error;
 
 use crate::config::{EffectiveSshConfig, RuleStore, StoreError, parse_effective_config};
 use crate::domain::{
-    ActiveForward, Failure, FailureKind, ForwardRule, ForwardRuleId, ForwardState, Session,
-    SessionState, Target, TargetId, TransitionError,
+    ActiveForward, ActiveForwardKind, Failure, FailureKind, ForwardKind, ForwardRule,
+    ForwardRuleId, ForwardState, Session, SessionState, Target, TargetId, TransitionError,
 };
 use crate::runtime::{RuntimeDirectory, RuntimeError};
-use crate::ssh::{LocalForwardSpec, SshClient, SshError, SshOutput};
+use crate::ssh::{DynamicForwardSpec, LocalForwardSpec, SshClient, SshError, SshOutput};
 
 /// Maximum number of sequential ports considered for one add operation.
 pub const DEFAULT_PORT_ATTEMPTS: usize = 20;
@@ -25,12 +25,10 @@ pub struct ForwardRuleDraft {
     pub label: Option<String>,
     /// Local-side bind address.
     pub bind_address: String,
-    /// Preferred local port, or the remote port when omitted.
+    /// Preferred local port, or the forwarding-kind default when omitted.
     pub requested_local_port: Option<u16>,
-    /// Host reached from the remote side.
-    pub remote_host: String,
-    /// Port reached from the remote side.
-    pub remote_port: u16,
+    /// Explicit forwarding capability and its kind-specific values.
+    pub kind: ForwardKind,
     /// Whether activation will expose the listener beyond loopback.
     pub public_bind: bool,
 }
@@ -72,8 +70,42 @@ impl ForwardRuleDraft {
             label,
             bind_address,
             requested_local_port,
-            remote_host,
-            remote_port,
+            kind: ForwardKind::Local {
+                remote_host,
+                remote_port,
+            },
+            public_bind: spec.is_public_bind(),
+        })
+    }
+
+    /// Parses an OpenSSH SOCKS listener and applies loopback/1080 defaults.
+    pub fn parse_socks(
+        label: &str,
+        bind_address: &str,
+        requested_local_port: &str,
+    ) -> Result<Self, RuleError> {
+        if label.contains(['\0', '\n', '\r']) {
+            return Err(RuleError::InvalidLabel);
+        }
+        let label = (!label.trim().is_empty()).then(|| label.trim().to_owned());
+        let bind_address = if bind_address.trim().is_empty() {
+            "127.0.0.1".to_owned()
+        } else {
+            bind_address.trim().to_owned()
+        };
+        let requested_local_port = if requested_local_port.trim().is_empty() {
+            None
+        } else {
+            Some(parse_port(requested_local_port, "希望ローカルポート")?)
+        };
+        let spec = DynamicForwardSpec::new(&bind_address, requested_local_port.unwrap_or(1080))
+            .map_err(|error| RuleError::InvalidForward(error.to_string()))?;
+
+        Ok(Self {
+            label,
+            bind_address,
+            requested_local_port,
+            kind: ForwardKind::Socks,
             public_bind: spec.is_public_bind(),
         })
     }
@@ -170,8 +202,7 @@ impl<B: SshClient, P: PortProbe> AppState<B, P> {
             label: draft.label,
             bind_address: draft.bind_address,
             requested_local_port: draft.requested_local_port,
-            remote_host: draft.remote_host,
-            remote_port: draft.remote_port,
+            kind: draft.kind,
         };
         self.rules.entry(target_id.clone()).or_default().push(rule);
         if let Err(error) = self.persist_rules() {
@@ -223,8 +254,7 @@ impl<B: SshClient, P: PortProbe> AppState<B, P> {
             label: draft.label,
             bind_address: draft.bind_address,
             requested_local_port: draft.requested_local_port,
-            remote_host: draft.remote_host,
-            remote_port: draft.remote_port,
+            kind: draft.kind,
         };
         if let Err(error) = self.persist_rules() {
             tracing::debug!(
@@ -760,9 +790,13 @@ impl<B: SshClient, P: PortProbe> SessionManager<B, P> {
 
     /// Adds a saved rule to its connected ControlMaster with bounded port fallback.
     pub fn activate_forward(&mut self, rule: &ForwardRule) -> Result<u16, ManagerError> {
-        let trace = start_forward_operation("add_local_forward", rule);
+        let operation = match &rule.kind {
+            ForwardKind::Local { .. } => "add_local_forward",
+            ForwardKind::Socks => "add_dynamic_forward",
+        };
+        let trace = start_forward_operation(operation, rule);
         let result = self.activate_forward_inner(rule, trace.operation_id);
-        finish_operation("add_local_forward", trace, &result);
+        finish_operation(operation, trace, &result);
         result
     }
 
@@ -788,7 +822,7 @@ impl<B: SshClient, P: PortProbe> SessionManager<B, P> {
         }
         runtime_forward.transition(ForwardState::Adding)?;
 
-        let start_port = rule.requested_local_port.unwrap_or(rule.remote_port);
+        let start_port = rule.default_local_port();
         let candidates = port_candidates(start_port, self.port_attempts);
         let mut last_conflict_detail = None;
 
@@ -799,8 +833,9 @@ impl<B: SshClient, P: PortProbe> SessionManager<B, P> {
                 operation_id,
                 target_id = rule.target_id.as_str(),
                 rule_id = rule.id.as_str(),
+                forward_kind = forward_kind_label(&rule.kind),
                 candidate_port = candidate,
-                "local forward port candidate selected"
+                "forward port candidate selected"
             );
             match self.port_probe.is_available(&rule.bind_address, candidate) {
                 Ok(false) => {
@@ -810,9 +845,10 @@ impl<B: SshClient, P: PortProbe> SessionManager<B, P> {
                         operation_id,
                         target_id = rule.target_id.as_str(),
                         rule_id = rule.id.as_str(),
+                        forward_kind = forward_kind_label(&rule.kind),
                         candidate_port = candidate,
                         available = false,
-                        "local forward port candidate unavailable"
+                        "forward port candidate unavailable"
                     );
                     last_conflict_detail = Some(format!(
                         "ローカル側 {}:{candidate} は使用中です",
@@ -832,13 +868,38 @@ impl<B: SshClient, P: PortProbe> SessionManager<B, P> {
                 Ok(true) => {}
             }
 
-            let spec = match LocalForwardSpec::new(
-                &rule.bind_address,
-                candidate,
-                &rule.remote_host,
-                rule.remote_port,
-            ) {
-                Ok(spec) => spec,
+            let operation = match &rule.kind {
+                ForwardKind::Local {
+                    remote_host,
+                    remote_port,
+                } => {
+                    LocalForwardSpec::new(&rule.bind_address, candidate, remote_host, *remote_port)
+                        .map(|spec| {
+                            let normalized = spec.as_argument();
+                            self.ssh
+                                .add_local_forward(
+                                    &entry.target.host_alias,
+                                    &entry.session.control_path,
+                                    &spec,
+                                )
+                                .map(|output| (output, ActiveForwardKind::Local, normalized))
+                        })
+                }
+                ForwardKind::Socks => {
+                    DynamicForwardSpec::new(&rule.bind_address, candidate).map(|spec| {
+                        let normalized = spec.as_argument();
+                        self.ssh
+                            .add_dynamic_forward(
+                                &entry.target.host_alias,
+                                &entry.session.control_path,
+                                &spec,
+                            )
+                            .map(|output| (output, ActiveForwardKind::Socks, normalized))
+                    })
+                }
+            };
+            let operation = match operation {
+                Ok(operation) => operation,
                 Err(error) => {
                     let failure = Failure::new(
                         FailureKind::LocalOperationFailed,
@@ -849,12 +910,7 @@ impl<B: SshClient, P: PortProbe> SessionManager<B, P> {
                     return Err(ManagerError::Operation(failure));
                 }
             };
-
-            let output = match self.ssh.add_local_forward(
-                &entry.target.host_alias,
-                &entry.session.control_path,
-                &spec,
-            ) {
+            let (output, kind, normalized_spec) = match operation {
                 Ok(output) => output,
                 Err(error) => {
                     let failure = failure_from_ssh_error(error, "転送を追加できません");
@@ -863,7 +919,7 @@ impl<B: SshClient, P: PortProbe> SessionManager<B, P> {
                 }
             };
             if output.success {
-                runtime_forward.activate(candidate, spec.as_argument())?;
+                runtime_forward.activate(candidate, kind, normalized_spec)?;
                 return Ok(candidate);
             }
             if output_indicates_controlmaster_unavailable(&output) {
@@ -906,9 +962,13 @@ impl<B: SshClient, P: PortProbe> SessionManager<B, P> {
 
     /// Cancels an active forward using the exact normalized values used to add it.
     pub fn cancel_forward(&mut self, rule: &ForwardRule) -> Result<(), ManagerError> {
-        let trace = start_forward_operation("cancel_local_forward", rule);
+        let operation = match &rule.kind {
+            ForwardKind::Local { .. } => "cancel_local_forward",
+            ForwardKind::Socks => "cancel_dynamic_forward",
+        };
+        let trace = start_forward_operation(operation, rule);
         let result = self.cancel_forward_inner(rule);
-        finish_operation("cancel_local_forward", trace, &result);
+        finish_operation(operation, trace, &result);
         result
     }
 
@@ -928,12 +988,19 @@ impl<B: SshClient, P: PortProbe> SessionManager<B, P> {
         let actual_port = runtime_forward
             .actual_local_port
             .ok_or(ManagerError::MissingRuntimeForwardData)?;
-        let spec = LocalForwardSpec::new(
-            &rule.bind_address,
-            actual_port,
-            &rule.remote_host,
-            rule.remote_port,
-        )
+        let expected_kind = ActiveForwardKind::from(&rule.kind);
+        if runtime_forward.kind != Some(expected_kind) {
+            return Err(ManagerError::MissingRuntimeForwardData);
+        }
+        let normalized_spec = match &rule.kind {
+            ForwardKind::Local {
+                remote_host,
+                remote_port,
+            } => LocalForwardSpec::new(&rule.bind_address, actual_port, remote_host, *remote_port)
+                .map(|spec| spec.as_argument()),
+            ForwardKind::Socks => DynamicForwardSpec::new(&rule.bind_address, actual_port)
+                .map(|spec| spec.as_argument()),
+        }
         .map_err(|error| {
             ManagerError::Operation(Failure::new(
                 FailureKind::LocalOperationFailed,
@@ -941,16 +1008,29 @@ impl<B: SshClient, P: PortProbe> SessionManager<B, P> {
                 Some(error.to_string()),
             ))
         })?;
-        if runtime_forward.normalized_spec.as_deref() != Some(spec.as_argument().as_str()) {
+        if runtime_forward.normalized_spec.as_deref() != Some(normalized_spec.as_str()) {
             return Err(ManagerError::MissingRuntimeForwardData);
         }
-
         runtime_forward.transition(ForwardState::Removing)?;
-        let output = match self.ssh.cancel_local_forward(
-            &entry.target.host_alias,
-            &entry.session.control_path,
-            &spec,
-        ) {
+
+        let operation = match &rule.kind {
+            ForwardKind::Local {
+                remote_host,
+                remote_port,
+            } => self.ssh.cancel_local_forward(
+                &entry.target.host_alias,
+                &entry.session.control_path,
+                &LocalForwardSpec::new(&rule.bind_address, actual_port, remote_host, *remote_port)
+                    .expect("the exact local specification was validated above"),
+            ),
+            ForwardKind::Socks => self.ssh.cancel_dynamic_forward(
+                &entry.target.host_alias,
+                &entry.session.control_path,
+                &DynamicForwardSpec::new(&rule.bind_address, actual_port)
+                    .expect("the exact dynamic specification was validated above"),
+            ),
+        };
+        let output = match operation {
             Ok(output) => output,
             Err(error) => {
                 let failure = failure_from_ssh_error(error, "転送を取消できません");
@@ -1151,11 +1231,19 @@ fn start_forward_operation(operation: &'static str, rule: &ForwardRule) -> Opera
         operation_id,
         target_id = rule.target_id.as_str(),
         rule_id = rule.id.as_str(),
+        forward_kind = forward_kind_label(&rule.kind),
         "application operation started"
     );
     OperationTrace {
         operation_id,
         started: Instant::now(),
+    }
+}
+
+fn forward_kind_label(kind: &ForwardKind) -> &'static str {
+    match kind {
+        ForwardKind::Local { .. } => "local",
+        ForwardKind::Socks => "socks",
     }
 }
 
@@ -1324,10 +1412,11 @@ mod tests {
 
     use crate::config::RuleStore;
     use crate::domain::{
-        FailureKind, ForwardRule, ForwardRuleId, ForwardState, SessionState, Target, TargetId,
+        ActiveForwardKind, FailureKind, ForwardKind, ForwardRule, ForwardRuleId, ForwardState,
+        SessionState, Target, TargetId,
     };
     use crate::runtime::RuntimeDirectory;
-    use crate::ssh::{LocalForwardSpec, SshClient, SshError, SshOutput};
+    use crate::ssh::{DynamicForwardSpec, LocalForwardSpec, SshClient, SshError, SshOutput};
 
     use super::{
         AppActionError, AppState, ForwardRuleDraft, PortProbe, RuleError, SessionManager,
@@ -1336,6 +1425,8 @@ mod tests {
 
     #[derive(Clone)]
     struct CaptureWriter(Arc<Mutex<Vec<u8>>>);
+
+    static DEBUG_CAPTURE_LOCK: Mutex<()> = Mutex::new(());
 
     impl Write for CaptureWriter {
         fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
@@ -1349,6 +1440,9 @@ mod tests {
     }
 
     fn capture_debug_events(action: impl FnOnce()) -> String {
+        let _guard = DEBUG_CAPTURE_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let captured = Arc::new(Mutex::new(Vec::new()));
         let writer = Arc::clone(&captured);
         let subscriber = tracing_subscriber::fmt()
@@ -1432,6 +1526,32 @@ mod tests {
             _host_alias: &str,
             _control_path: &Path,
             forward: &LocalForwardSpec,
+        ) -> Result<SshOutput, SshError> {
+            self.canceled_specs.borrow_mut().push(forward.as_argument());
+            Ok(self.cancel.borrow_mut().pop_front().unwrap_or_else(success))
+        }
+
+        fn add_dynamic_forward(
+            &self,
+            _host_alias: &str,
+            _control_path: &Path,
+            forward: &DynamicForwardSpec,
+        ) -> Result<SshOutput, SshError> {
+            self.forwarded_specs
+                .borrow_mut()
+                .push(forward.as_argument());
+            Ok(self
+                .forward
+                .borrow_mut()
+                .pop_front()
+                .unwrap_or_else(success))
+        }
+
+        fn cancel_dynamic_forward(
+            &self,
+            _host_alias: &str,
+            _control_path: &Path,
+            forward: &DynamicForwardSpec,
         ) -> Result<SshOutput, SshError> {
             self.canceled_specs.borrow_mut().push(forward.as_argument());
             Ok(self.cancel.borrow_mut().pop_front().unwrap_or_else(success))
@@ -1522,8 +1642,21 @@ mod tests {
             label: Some("web".to_owned()),
             bind_address: "127.0.0.1".to_owned(),
             requested_local_port: Some(8080),
-            remote_host: "127.0.0.1".to_owned(),
-            remote_port: 3000,
+            kind: ForwardKind::Local {
+                remote_host: "127.0.0.1".to_owned(),
+                remote_port: 3000,
+            },
+        }
+    }
+
+    fn socks_rule() -> ForwardRule {
+        ForwardRule {
+            id: ForwardRuleId::new("proxy"),
+            target_id: TargetId::new("dev"),
+            label: Some("SOCKS".to_owned()),
+            bind_address: "127.0.0.1".to_owned(),
+            requested_local_port: None,
+            kind: ForwardKind::Socks,
         }
     }
 
@@ -1686,6 +1819,65 @@ mod tests {
             forward.last_error.as_ref().unwrap().kind,
             FailureKind::ForwardRejected
         );
+    }
+
+    #[test]
+    fn socks_uses_1080_then_bounded_fallback_and_exact_cancel_spec() {
+        let test_runtime = TestRuntime::new();
+        let mut ssh = FakeSsh::successful();
+        ssh.forward
+            .get_mut()
+            .extend([failure("Address already in use"), success()]);
+        let mut manager = SessionManager::with_port_probe(
+            ssh,
+            test_runtime.runtime(),
+            vec![target()],
+            FakePortProbe::default(),
+        )
+        .unwrap();
+        manager.connect(&TargetId::new("dev")).unwrap();
+
+        assert_eq!(manager.activate_forward(&socks_rule()).unwrap(), 1081);
+        manager.cancel_forward(&socks_rule()).unwrap();
+
+        assert_eq!(
+            manager.ssh.forwarded_specs.borrow().as_slice(),
+            ["127.0.0.1:1080", "127.0.0.1:1081"]
+        );
+        assert_eq!(
+            manager.ssh.canceled_specs.borrow().as_slice(),
+            ["127.0.0.1:1081"]
+        );
+        let runtime =
+            &manager.entry(&TargetId::new("dev")).unwrap().forwards[&ForwardRuleId::new("proxy")];
+        assert_eq!(runtime.state, ForwardState::Inactive);
+        assert_eq!(runtime.kind, None);
+    }
+
+    #[test]
+    fn failed_socks_cancel_retains_kind_port_and_exact_spec() {
+        let test_runtime = TestRuntime::new();
+        let mut ssh = FakeSsh::successful();
+        ssh.forward.get_mut().push_back(success());
+        ssh.cancel.get_mut().push_back(failure("cancel failed"));
+        let mut manager = SessionManager::with_port_probe(
+            ssh,
+            test_runtime.runtime(),
+            vec![target()],
+            FakePortProbe::default(),
+        )
+        .unwrap();
+        manager.connect(&TargetId::new("dev")).unwrap();
+        manager.activate_forward(&socks_rule()).unwrap();
+
+        manager.cancel_forward(&socks_rule()).unwrap_err();
+
+        let runtime =
+            &manager.entry(&TargetId::new("dev")).unwrap().forwards[&ForwardRuleId::new("proxy")];
+        assert_eq!(runtime.state, ForwardState::Failed);
+        assert_eq!(runtime.actual_local_port, Some(1080));
+        assert_eq!(runtime.kind, Some(ActiveForwardKind::Socks));
+        assert_eq!(runtime.normalized_spec.as_deref(), Some("127.0.0.1:1080"));
     }
 
     #[test]
@@ -1886,8 +2078,13 @@ mod tests {
         assert_eq!(draft.label.as_deref(), Some("web"));
         assert_eq!(draft.bind_address, "127.0.0.1");
         assert_eq!(draft.requested_local_port, None);
-        assert_eq!(draft.remote_host, "127.0.0.1");
-        assert_eq!(draft.remote_port, 3000);
+        assert_eq!(
+            draft.kind,
+            ForwardKind::Local {
+                remote_host: "127.0.0.1".to_owned(),
+                remote_port: 3000,
+            }
+        );
         assert!(!draft.public_bind);
     }
 
@@ -1901,6 +2098,20 @@ mod tests {
                 field: "リモート宛先ポート"
             }
         );
+    }
+
+    #[test]
+    fn socks_form_defaults_to_private_1080_and_marks_public_binds() {
+        let draft = ForwardRuleDraft::parse_socks(" proxy ", "", "").unwrap();
+        assert_eq!(draft.label.as_deref(), Some("proxy"));
+        assert_eq!(draft.bind_address, "127.0.0.1");
+        assert_eq!(draft.requested_local_port, None);
+        assert_eq!(draft.kind, ForwardKind::Socks);
+        assert!(!draft.public_bind);
+
+        let public = ForwardRuleDraft::parse_socks("", "::", "1080").unwrap();
+        assert!(public.public_bind);
+        assert_eq!(public.requested_local_port, Some(1080));
     }
 
     #[test]
@@ -1957,8 +2168,13 @@ mod tests {
         assert_eq!(rules[0].label.as_deref(), Some("edited web"));
         assert_eq!(rules[0].bind_address, "::1");
         assert_eq!(rules[0].requested_local_port, Some(18080));
-        assert_eq!(rules[0].remote_host, "web.internal");
-        assert_eq!(rules[0].remote_port, 4000);
+        assert_eq!(
+            rules[0].kind,
+            ForwardKind::Local {
+                remote_host: "web.internal".to_owned(),
+                remote_port: 4000,
+            }
+        );
         assert_eq!(rules[1], second);
     }
 
@@ -1991,6 +2207,7 @@ mod tests {
                         rule_id: ForwardRuleId::new("web"),
                         actual_local_port: None,
                         normalized_spec: None,
+                        kind: None,
                         state,
                         last_error: None,
                     },
@@ -2034,6 +2251,7 @@ mod tests {
                     rule_id: ForwardRuleId::new("web"),
                     actual_local_port: Some(8080),
                     normalized_spec: Some("127.0.0.1:8080:127.0.0.1:3000".to_owned()),
+                    kind: Some(ActiveForwardKind::Local),
                     state: ForwardState::Inactive,
                     last_error: None,
                 },
@@ -2204,14 +2422,22 @@ mod tests {
         let events = capture_debug_events(|| {
             manager.connect(&TargetId::new("dev")).unwrap();
             manager.activate_forward(&rule()).unwrap();
+            manager.activate_forward(&socks_rule()).unwrap();
+            manager.cancel_forward(&rule()).unwrap();
+            manager.cancel_forward(&socks_rule()).unwrap();
             assert!(manager.shutdown_all().is_empty());
         });
 
         assert!(events.contains("operation=\"connect\""));
         assert!(events.contains("operation=\"add_local_forward\""));
+        assert!(events.contains("operation=\"add_dynamic_forward\""));
+        assert!(events.contains("operation=\"cancel_local_forward\""));
+        assert!(events.contains("operation=\"cancel_dynamic_forward\""));
+        assert!(events.contains("forward_kind=\"local\""));
+        assert!(events.contains("forward_kind=\"socks\""));
         assert!(events.contains("operation=\"disconnect\""));
         assert!(events.contains("operation_id"));
-        assert!(events.contains("elapsed_ms"));
+        assert!(events.contains("elapsed_ms"), "{events}");
         assert!(!events.contains("OpenSSH_9.6p1"));
         assert!(!events.contains("Permission denied"));
     }

@@ -7,7 +7,7 @@ use std::sync::{Mutex, MutexGuard, mpsc};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use portdeck::ssh::{LocalForwardSpec, OpenSsh};
+use portdeck::ssh::{DynamicForwardSpec, LocalForwardSpec, OpenSsh};
 
 static FAKE_SSH_LOCK: Mutex<()> = Mutex::new(());
 
@@ -239,6 +239,51 @@ fn fake_cancel_failure_reuses_the_exact_forward_argument() {
             "cancel",
             "-L",
             "127.0.0.1:8080:[::1]:3000",
+            "dev",
+        ]
+    );
+}
+
+#[test]
+fn fake_dynamic_forward_and_cancel_use_exact_individual_arguments() {
+    let fake = FakeSsh::new(0);
+    let ssh = OpenSsh::new(&fake.executable);
+    let forward = DynamicForwardSpec::new("::1", 1080).unwrap();
+
+    let output = ssh
+        .add_dynamic_forward("dev", Path::new("control"), &forward)
+        .unwrap();
+    assert!(output.success);
+    assert_eq!(
+        fake.arguments(),
+        [
+            "-S",
+            "control",
+            "-o",
+            "ClearAllForwardings=no",
+            "-O",
+            "forward",
+            "-D",
+            "[::1]:1080",
+            "dev",
+        ]
+    );
+
+    let output = ssh
+        .cancel_dynamic_forward("dev", Path::new("control"), &forward)
+        .unwrap();
+    assert!(output.success);
+    assert_eq!(
+        fake.arguments(),
+        [
+            "-S",
+            "control",
+            "-o",
+            "ClearAllForwardings=no",
+            "-O",
+            "cancel",
+            "-D",
+            "[::1]:1080",
             "dev",
         ]
     );

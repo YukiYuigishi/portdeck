@@ -30,7 +30,7 @@ fn run() -> Result<()> {
         }
         Mode::Help => {
             println!(
-                "portdeck {version}\n\nSSH connection and local-forward manager\n\nUSAGE:\n    portdeck [--debug] [--diagnose]\n    portdeck [--version | --help]\n\nOPTIONS:\n    --debug       Write private DEBUG logs under the XDG State directory\n                  (credentials, raw key input, and raw OpenSSH output are omitted)\n    --diagnose    Print the detected OpenSSH version\n    -V, --version Print portdeck's version\n    -h, --help    Print help"
+                "portdeck {version}\n\nSSH connection and forwarding manager\n\nUSAGE:\n    portdeck [--debug] [--diagnose]\n    portdeck [--version | --help]\n\nOPTIONS:\n    --debug       Write private DEBUG logs under the XDG State directory\n                  (credentials, raw key input, and raw OpenSSH output are omitted)\n    --diagnose    Print the detected OpenSSH version\n    -V, --version Print portdeck's version\n    -h, --help    Print help"
             );
             Ok(())
         }

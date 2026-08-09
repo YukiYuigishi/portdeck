@@ -1,6 +1,6 @@
 # Select local or SOCKS forwarding
 
-- Status: Proposed
+- Status: Resolved
 - Priority: Medium
 - Reported: 2026-08-09
 - Milestone: Post-MVP
@@ -104,13 +104,23 @@ OpenSSHの終了ステータスが成功するまでActiveと表示しない。�
 
 ## Acceptance criteria
 
-- [ ] 転送ルールの追加・編集時にLocalまたはSOCKSを選択できる。
-- [ ] SOCKSルールは既定で`127.0.0.1:1080`を使用する。
-- [ ] `Space`でSOCKS listenerを追加・取消でき、実際のローカルポートを表示する。
-- [ ] OpenSSHの成功終了前にActiveと表示しない。
-- [ ] ポート競合時に上限付きで別候補を試す。
-- [ ] 外部公開bindに明示警告が表示される。
-- [ ] 既存のLocal forward設定を変更なしで読み込める。
-- [ ] 終了時にSOCKS forwardとControlMasterが残らない。
-- [ ] direct接続とProxyJump接続の両方でSOCKS実通信を確認する統合テストがある。
-- [ ] SOCKS処理はシステムOpenSSHへ委譲され、本ツール内に独自proxyを実装しない。
+- [x] 転送ルールの追加・編集時にLocalまたはSOCKSを選択できる。
+- [x] SOCKSルールは既定で`127.0.0.1:1080`を使用する。
+- [x] `Space`でSOCKS listenerを追加・取消でき、実際のローカルポートを表示する。
+- [x] OpenSSHの成功終了前にActiveと表示しない。
+- [x] ポート競合時に上限付きで別候補を試す。
+- [x] 外部公開bindに明示警告が表示される。
+- [x] 既存のLocal forward設定を変更なしで読み込める。
+- [x] 終了時にSOCKS forwardとControlMasterが残らない。
+- [x] direct接続とProxyJump接続の両方でSOCKS実通信を確認する統合テストがある。
+- [x] SOCKS処理はシステムOpenSSHへ委譲され、本ツール内に独自proxyを実装しない。
+
+## Resolution
+
+2026-08-09に実装・検証した。
+
+- ドメインと永続化でLocal／SOCKSを明示的なvariantとして保持する。
+- 旧schema version 1の`kind`なしルールはLocalとして読み込み、新規保存時に種別を明示する。
+- OpenSSHへ`-O forward -D`／`-O cancel -D`を正規化済みの同一指定で渡す。
+- TUIの追加・編集フォーム、混在一覧、小さい端末表示、SOCKS外部公開警告をテストした。
+- 隔離sshdでdirectとProxyJumpの双方についてSOCKS5 handshake、TCP往復、取消後のlistener閉鎖、ControlMaster終了を確認した。

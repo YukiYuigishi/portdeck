@@ -9,8 +9,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::domain::{ForwardRule, ForwardRuleId, Target, TargetId};
-use crate::ssh::{LocalForwardSpec, validate_host_alias};
+use crate::domain::{ForwardKind, ForwardRule, ForwardRuleId, Target, TargetId};
+use crate::ssh::{DynamicForwardSpec, LocalForwardSpec, validate_host_alias};
 
 const SCHEMA_VERSION: u32 = 1;
 
@@ -243,8 +243,19 @@ struct StoredForward {
     bind_address: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     requested_local_port: Option<u16>,
-    remote_host: String,
-    remote_port: u16,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    kind: Option<StoredForwardKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    remote_host: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    remote_port: Option<u16>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+enum StoredForwardKind {
+    Local,
+    Socks,
 }
 
 impl StoredForward {
@@ -261,41 +272,85 @@ impl StoredForward {
                 self.id
             )));
         }
-        LocalForwardSpec::new(
-            &self.bind_address,
-            self.requested_local_port.unwrap_or(self.remote_port),
-            &self.remote_host,
-            self.remote_port,
-        )
-        .map_err(|error| {
+        self.domain_kind().map_err(|error| {
             StoreError::InvalidData(format!("invalid stored forward {:?}: {error}", self.id))
         })?;
         Ok(())
     }
 
+    fn domain_kind(&self) -> Result<ForwardKind, String> {
+        match self.kind.unwrap_or(StoredForwardKind::Local) {
+            StoredForwardKind::Local => {
+                let remote_host = self
+                    .remote_host
+                    .as_deref()
+                    .ok_or("Local forward is missing remote_host")?;
+                let remote_port = self
+                    .remote_port
+                    .ok_or("Local forward is missing remote_port")?;
+                LocalForwardSpec::new(
+                    &self.bind_address,
+                    self.requested_local_port.unwrap_or(remote_port),
+                    remote_host,
+                    remote_port,
+                )
+                .map_err(|error| error.to_string())?;
+                Ok(ForwardKind::Local {
+                    remote_host: remote_host.to_owned(),
+                    remote_port,
+                })
+            }
+            StoredForwardKind::Socks => {
+                if self.remote_host.is_some() || self.remote_port.is_some() {
+                    return Err("SOCKS forward must not contain a remote destination".to_owned());
+                }
+                DynamicForwardSpec::new(
+                    &self.bind_address,
+                    self.requested_local_port.unwrap_or(1080),
+                )
+                .map_err(|error| error.to_string())?;
+                Ok(ForwardKind::Socks)
+            }
+        }
+    }
+
     fn into_domain(self, target_id: &TargetId) -> Result<ForwardRule, StoreError> {
         self.validate()?;
+        let kind = self.domain_kind().map_err(|error| {
+            StoreError::InvalidData(format!("invalid stored forward {:?}: {error}", self.id))
+        })?;
         Ok(ForwardRule {
             id: ForwardRuleId::new(self.id),
             target_id: target_id.clone(),
             label: self.label,
             bind_address: self.bind_address,
             requested_local_port: self.requested_local_port,
-            remote_host: self.remote_host,
-            remote_port: self.remote_port,
+            kind,
         })
     }
 }
 
 impl From<&ForwardRule> for StoredForward {
     fn from(rule: &ForwardRule) -> Self {
+        let (kind, remote_host, remote_port) = match &rule.kind {
+            ForwardKind::Local {
+                remote_host,
+                remote_port,
+            } => (
+                StoredForwardKind::Local,
+                Some(remote_host.clone()),
+                Some(*remote_port),
+            ),
+            ForwardKind::Socks => (StoredForwardKind::Socks, None, None),
+        };
         Self {
             id: rule.id.as_str().to_owned(),
             label: rule.label.clone(),
             bind_address: rule.bind_address.clone(),
             requested_local_port: rule.requested_local_port,
-            remote_host: rule.remote_host.clone(),
-            remote_port: rule.remote_port,
+            kind: Some(kind),
+            remote_host,
+            remote_port,
         }
     }
 }
@@ -460,7 +515,7 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use crate::domain::{ForwardRule, ForwardRuleId, Target, TargetId};
+    use crate::domain::{ForwardKind, ForwardRule, ForwardRuleId, Target, TargetId};
 
     use super::{RuleStore, StoreError};
 
@@ -506,8 +561,10 @@ mod tests {
             label: Some("database".to_owned()),
             bind_address: "127.0.0.1".to_owned(),
             requested_local_port: None,
-            remote_host: "db.internal".to_owned(),
-            remote_port: 5432,
+            kind: ForwardKind::Local {
+                remote_host: "db.internal".to_owned(),
+                remote_port: 5432,
+            },
         }
     }
 
@@ -539,6 +596,95 @@ mod tests {
     }
 
     #[test]
+    fn local_and_socks_rules_round_trip_with_explicit_kinds() {
+        let directory = TestDirectory::new();
+        let path = directory.path().join("config.toml");
+        let mut store = RuleStore::at(&path);
+        let local = rule();
+        let socks = ForwardRule {
+            id: ForwardRuleId::new("proxy"),
+            target_id: TargetId::new("dev"),
+            label: Some("browser".to_owned()),
+            bind_address: "::1".to_owned(),
+            requested_local_port: Some(1081),
+            kind: ForwardKind::Socks,
+        };
+
+        store.save(&[target("dev")], &[&local, &socks]).unwrap();
+        let loaded = store.load(&[target("dev")]).unwrap();
+
+        assert_eq!(loaded, [local, socks]);
+        let contents = fs::read_to_string(path).unwrap();
+        assert!(contents.contains("kind = \"local\""));
+        assert!(contents.contains("kind = \"socks\""));
+    }
+
+    #[test]
+    fn legacy_rule_without_kind_migrates_to_local() {
+        let directory = TestDirectory::new();
+        let path = directory.path().join("config.toml");
+        fs::write(
+            &path,
+            r#"version = 1
+
+[[targets]]
+host_alias = "dev"
+
+[[targets.forwards]]
+id = "legacy-web"
+bind_address = "127.0.0.1"
+remote_host = "127.0.0.1"
+remote_port = 3000
+"#,
+        )
+        .unwrap();
+        let mut store = RuleStore::at(&path);
+
+        let loaded = store.load(&[target("dev")]).unwrap();
+
+        assert_eq!(
+            loaded[0].kind,
+            ForwardKind::Local {
+                remote_host: "127.0.0.1".to_owned(),
+                remote_port: 3000,
+            }
+        );
+        store.save(&[target("dev")], &[&loaded[0]]).unwrap();
+        assert!(
+            fs::read_to_string(path)
+                .unwrap()
+                .contains("kind = \"local\"")
+        );
+    }
+
+    #[test]
+    fn socks_rule_rejects_remote_destination_fields() {
+        let directory = TestDirectory::new();
+        let path = directory.path().join("config.toml");
+        fs::write(
+            &path,
+            r#"version = 1
+
+[[targets]]
+host_alias = "dev"
+
+[[targets.forwards]]
+id = "proxy"
+bind_address = "127.0.0.1"
+kind = "socks"
+remote_host = "unexpected"
+remote_port = 80
+"#,
+        )
+        .unwrap();
+
+        assert!(matches!(
+            RuleStore::at(path).load(&[target("dev")]),
+            Err(StoreError::InvalidData(_))
+        ));
+    }
+
+    #[test]
     fn edited_rule_replaces_persisted_fields_without_changing_identity() {
         let directory = TestDirectory::new();
         let path = directory.path().join("config.toml");
@@ -550,8 +696,10 @@ mod tests {
         edited.label = Some("edited database".to_owned());
         edited.bind_address = "::1".to_owned();
         edited.requested_local_port = Some(15432);
-        edited.remote_host = "db.internal.example".to_owned();
-        edited.remote_port = 6432;
+        edited.kind = ForwardKind::Local {
+            remote_host: "db.internal.example".to_owned(),
+            remote_port: 6432,
+        };
 
         store.save(&targets, &[&edited]).unwrap();
         let loaded = store.load(&targets).unwrap();

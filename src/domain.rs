@@ -150,7 +150,19 @@ impl Session {
 
     /// Applies a checked state transition.
     pub fn transition(&mut self, next: SessionState) -> Result<(), TransitionError> {
+        let previous = self.state;
+        let operation_id = crate::logging::next_operation_id();
         if !valid_session_transition(self.state, next) {
+            tracing::debug!(
+                component = "domain",
+                operation = "session_transition",
+                operation_id,
+                target_id = self.target_id.as_str(),
+                from = ?previous,
+                to = ?next,
+                accepted = false,
+                "session state transition rejected"
+            );
             return Err(TransitionError::Session {
                 from: self.state,
                 to: next,
@@ -161,13 +173,32 @@ impl Session {
         if next != SessionState::Failed {
             self.last_error = None;
         }
+        tracing::debug!(
+            component = "domain",
+            operation = "session_transition",
+            operation_id,
+            target_id = self.target_id.as_str(),
+            from = ?previous,
+            to = ?next,
+            accepted = true,
+            "session state transitioned"
+        );
         Ok(())
     }
 
     /// Records a failed operation.
     pub fn fail(&mut self, failure: Failure) -> Result<(), TransitionError> {
+        let kind = failure.kind;
         self.transition(SessionState::Failed)?;
         self.last_error = Some(failure);
+        tracing::debug!(
+            component = "domain",
+            operation = "session_failure",
+            operation_id = crate::logging::next_operation_id(),
+            target_id = self.target_id.as_str(),
+            failure_kind = ?kind,
+            "session failure classified"
+        );
         Ok(())
     }
 }
@@ -263,7 +294,19 @@ impl ActiveForward {
 
     /// Applies a checked state transition.
     pub fn transition(&mut self, next: ForwardState) -> Result<(), TransitionError> {
+        let previous = self.state;
+        let operation_id = crate::logging::next_operation_id();
         if !valid_forward_transition(self.state, next) {
+            tracing::debug!(
+                component = "domain",
+                operation = "forward_transition",
+                operation_id,
+                rule_id = self.rule_id.as_str(),
+                from = ?previous,
+                to = ?next,
+                accepted = false,
+                "forward state transition rejected"
+            );
             return Err(TransitionError::Forward {
                 from: self.state,
                 to: next,
@@ -279,6 +322,16 @@ impl ActiveForward {
             self.normalized_spec = None;
             self.kind = None;
         }
+        tracing::debug!(
+            component = "domain",
+            operation = "forward_transition",
+            operation_id,
+            rule_id = self.rule_id.as_str(),
+            from = ?previous,
+            to = ?next,
+            accepted = true,
+            "forward state transitioned"
+        );
         Ok(())
     }
 
@@ -298,8 +351,17 @@ impl ActiveForward {
 
     /// Records a failed operation.
     pub fn fail(&mut self, failure: Failure) -> Result<(), TransitionError> {
+        let kind = failure.kind;
         self.transition(ForwardState::Failed)?;
         self.last_error = Some(failure);
+        tracing::debug!(
+            component = "domain",
+            operation = "forward_failure",
+            operation_id = crate::logging::next_operation_id(),
+            rule_id = self.rule_id.as_str(),
+            failure_kind = ?kind,
+            "forward failure classified"
+        );
         Ok(())
     }
 }

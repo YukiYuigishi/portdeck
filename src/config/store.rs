@@ -56,6 +56,28 @@ impl RuleStore {
 
     /// Loads known target rules while preserving unknown target sections for later writes.
     pub fn load(&mut self, targets: &[Target]) -> Result<Vec<ForwardRule>, StoreError> {
+        let operation_id = crate::logging::next_operation_id();
+        tracing::debug!(
+            component = "persistence",
+            operation = "load",
+            operation_id,
+            targets = targets.len(),
+            "saved forward load started"
+        );
+        let result = self.load_inner(targets);
+        tracing::debug!(
+            component = "persistence",
+            operation = "load",
+            operation_id,
+            success = result.is_ok(),
+            rules = result.as_ref().map_or(0, Vec::len),
+            error_kind = result.as_ref().err().map(store_error_kind),
+            "saved forward load completed"
+        );
+        result
+    }
+
+    fn load_inner(&mut self, targets: &[Target]) -> Result<Vec<ForwardRule>, StoreError> {
         let contents = match fs::read_to_string(&self.path) {
             Ok(contents) => contents,
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
@@ -126,6 +148,28 @@ impl RuleStore {
 
     /// Atomically writes all known definitions without persisting runtime state.
     pub fn save(&mut self, targets: &[Target], rules: &[&ForwardRule]) -> Result<(), StoreError> {
+        let operation_id = crate::logging::next_operation_id();
+        tracing::debug!(
+            component = "persistence",
+            operation = "save",
+            operation_id,
+            targets = targets.len(),
+            rules = rules.len(),
+            "saved forward update started"
+        );
+        let result = self.save_inner(targets, rules);
+        tracing::debug!(
+            component = "persistence",
+            operation = "save",
+            operation_id,
+            success = result.is_ok(),
+            error_kind = result.as_ref().err().map(store_error_kind),
+            "saved forward update completed"
+        );
+        result
+    }
+
+    fn save_inner(&mut self, targets: &[Target], rules: &[&ForwardRule]) -> Result<(), StoreError> {
         let mut grouped: BTreeMap<&TargetId, Vec<&ForwardRule>> = BTreeMap::new();
         for rule in rules {
             grouped.entry(&rule.target_id).or_default().push(*rule);
@@ -154,6 +198,23 @@ impl RuleStore {
         };
         let contents = toml::to_string_pretty(&document).map_err(StoreError::Serialize)?;
         atomic_write(&self.path, contents.as_bytes())
+    }
+}
+
+fn store_error_kind(error: &StoreError) -> &'static str {
+    match error {
+        StoreError::RelativeConfigHome(_) => "relative_config_home",
+        StoreError::HomeDirectoryUnavailable => "home_unavailable",
+        StoreError::Read { .. } => "read",
+        StoreError::Parse { .. } => "parse",
+        StoreError::UnsupportedVersion(_) => "unsupported_version",
+        StoreError::InvalidData(_) => "invalid_data",
+        StoreError::Serialize(_) => "serialize",
+        StoreError::CreateDirectory { .. } => "create_directory",
+        StoreError::CreateTemporary { .. } => "create_temporary",
+        StoreError::WriteTemporary { .. } => "write_temporary",
+        StoreError::Replace { .. } => "replace",
+        StoreError::SyncDirectory { .. } => "sync_directory",
     }
 }
 

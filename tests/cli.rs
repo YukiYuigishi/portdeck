@@ -23,7 +23,9 @@ fn help_documents_the_supported_cli_modes() {
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.contains("SSH connection and forwarding manager"));
-    assert!(stdout.contains("portdeck [--diagnose | --version | --help]"));
+    assert!(stdout.contains("portdeck [--debug] [--diagnose]"));
+    assert!(stdout.contains("XDG State directory"));
+    assert!(stdout.contains("raw OpenSSH output are omitted"));
     assert!(output.stderr.is_empty());
 }
 
@@ -36,5 +38,17 @@ fn unknown_arguments_fail_with_a_clear_diagnostic() {
     assert_eq!(
         String::from_utf8(output.stderr).unwrap(),
         "portdeck: unknown argument: --unsupported\n"
+    );
+}
+
+#[test]
+fn duplicate_debug_arguments_are_rejected() {
+    let output = portdeck().args(["--debug", "--debug"]).output().unwrap();
+
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap(),
+        "portdeck: argument supplied more than once: --debug\n"
     );
 }

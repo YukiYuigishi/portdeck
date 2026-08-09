@@ -79,7 +79,7 @@ DEBUG eventをTUI描画中のstdout／stderrへ出力することもありませ
 
 次を確認してください。
 
-- 希望したローカルportと、その後の最大20候補が使用中ではないか
+- 希望したローカルportを含む最大20個の候補が使用中ではないか
 - SSH serverで`AllowTcpForwarding`が許可されているか
 - Local転送の場合、リモート側から宛先hostとportへ到達できるか
 - SOCKS転送の場合、選択したbind addressとportが適切か
@@ -101,7 +101,3 @@ portdeckは事前のbind確認だけでは転送成功とみなしません。`E
 ### runtime entryに関する起動警告が出る
 
 portdeckは既知の接続先へ対応するControlMasterだけを`ssh -O check`して回収します。現在の接続先へ対応づけられないentryは推測で削除せず、`E`の起動診断にパスを表示します。詳しくは[起動時の回収](runtime-and-configuration.md#起動時の回収)を参照してください。
-
-## 開発用の統合テスト環境
-
-実sshd、隔離した鍵と`known_hosts`、Local転送、direct／ProxyJumpのSOCKS5通信を使う統合テストは用意されています。必要な実行ファイルとコマンドは[CONTRIBUTING.md](../../CONTRIBUTING.md)を参照してください。このテストはユーザーのSSH設定、`known_hosts`、鍵、既存ControlMasterを変更しません。

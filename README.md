@@ -31,7 +31,9 @@ portdeck
 
 | Key | Action |
 | --- | --- |
-| `Tab` / `←` / `→` | TargetsとForwardsのペインを切り替える |
+| `Tab` | TargetsとForwardsのペインを切り替える |
+| `h` / `←` | Targetsペインへ移動する |
+| `l` / `→` | Forwardsペインへ移動する |
 | `↑` / `↓` / `j` / `k` | 選択を移動する |
 | `c` | 選択した接続先へ接続する |
 | `r` | `ssh -O check`で接続状態を再確認する |

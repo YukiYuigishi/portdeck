@@ -355,11 +355,19 @@ fn handle_normal_key<B: SshClient, P: PortProbe>(
     }
 
     match key.code {
-        KeyCode::Tab | KeyCode::Left | KeyCode::Right => {
+        KeyCode::Tab => {
             ui.focus = match ui.focus {
                 Focus::Targets => Focus::Forwards,
                 Focus::Forwards => Focus::Targets,
             };
+            UiCommand::None
+        }
+        KeyCode::Left | KeyCode::Char('h') => {
+            ui.focus = Focus::Targets;
+            UiCommand::None
+        }
+        KeyCode::Right | KeyCode::Char('l') => {
+            ui.focus = Focus::Forwards;
             UiCommand::None
         }
         KeyCode::Up | KeyCode::Char('k') => {
@@ -919,7 +927,7 @@ fn forward_rows<B: SshClient, P: PortProbe>(ui: &UiState, app: &AppState<B, P>) 
 fn render_footer(frame: &mut Frame<'_>, area: Rect, ui: &UiState) {
     let help = match ui.mode {
         Mode::Normal => {
-            "Tab: pane  ↑↓: select  c: connect  d: disconnect  a: add  Space: activate/cancel  D: delete  r: check  e: error  q: quit"
+            "Tab/h/l: pane  ↑↓: select  c: connect  d: disconnect  a: add  Space: activate/cancel  D: delete  r: check  e: error  q: quit"
         }
         Mode::ForwardForm => "Tab/↑↓: field  Enter: save  Esc: cancel",
         Mode::PublicBindWarning | Mode::Confirm(_) => "y/Enter: confirm  n/Esc: cancel",
@@ -1377,6 +1385,76 @@ mod tests {
 
         assert!(matches!(command, UiCommand::AddForward(_, _)));
         assert_eq!(ui.mode, Mode::Normal);
+    }
+
+    #[test]
+    fn vim_and_direction_keys_select_panes_without_toggling() {
+        let fixture = Fixture::new();
+        let mut ui = UiState::default();
+
+        handle_key(
+            &mut ui,
+            &fixture.app,
+            KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE),
+        );
+        assert_eq!(ui.focus, Focus::Forwards);
+        handle_key(
+            &mut ui,
+            &fixture.app,
+            KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE),
+        );
+        assert_eq!(ui.focus, Focus::Forwards);
+        handle_key(
+            &mut ui,
+            &fixture.app,
+            KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE),
+        );
+        assert_eq!(ui.focus, Focus::Targets);
+        handle_key(
+            &mut ui,
+            &fixture.app,
+            KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE),
+        );
+        assert_eq!(ui.focus, Focus::Targets);
+
+        handle_key(
+            &mut ui,
+            &fixture.app,
+            KeyEvent::new(KeyCode::Right, KeyModifiers::NONE),
+        );
+        assert_eq!(ui.focus, Focus::Forwards);
+        handle_key(
+            &mut ui,
+            &fixture.app,
+            KeyEvent::new(KeyCode::Left, KeyModifiers::NONE),
+        );
+        assert_eq!(ui.focus, Focus::Targets);
+        handle_key(
+            &mut ui,
+            &fixture.app,
+            KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+        );
+        assert_eq!(ui.focus, Focus::Forwards);
+    }
+
+    #[test]
+    fn vim_pane_keys_remain_text_in_forward_form() {
+        let fixture = Fixture::new();
+        let mut ui = UiState {
+            mode: Mode::ForwardForm,
+            ..UiState::default()
+        };
+
+        for character in ['h', 'l'] {
+            handle_key(
+                &mut ui,
+                &fixture.app,
+                KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE),
+            );
+        }
+
+        assert_eq!(ui.form.label, "hl");
+        assert_eq!(ui.focus, Focus::Targets);
     }
 
     #[test]

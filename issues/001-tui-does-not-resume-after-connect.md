@@ -47,9 +47,33 @@ ssh -M -N -f -S <control-path> ...
 stderr(Stdio::piped()).output()
 ```
 
-`-f`でbackground化されたControlMaster側にstderr pipeが継承される環境では、接続用の親プロセスが終了してもpipeのEOFが発生せず、`output()`が待ち続ける可能性がある。これは現時点では原因仮説であり、実際に停止しているPID、親子関係、file descriptorを確認して確定する。
+`-f`でbackground化されたControlMaster側にstderr pipeが継承される環境では、接続用の親プロセスが終了してもpipeのEOFが発生せず、`output()`が待ち続ける。
 
-既存の隔離sshd統合テストは独自executorを使用し、fake SSHテストは即時終了するスクリプトを使用するため、この待機状態を再現できていない可能性がある。
+調査開始時の隔離sshd統合テストは独自executorを使用し、fake SSHテストは即時終了するスクリプトを使用していたため、この待機状態を再現できていなかった。
+
+## Verification results
+
+### Background process retains stderr pipe
+
+2026-08-09、隔離fake SSHで接続用親プロセスから30秒生存するbackground子を作り、stderrを継承させた。
+
+- 接続用`ssh`プロセスは終了済みのzombieになった。
+- background子はPID 1へreparentされ、stderrの書き側を保持した。
+- portdeckは同じpipeの読み側を保持し、TUIをresumeしなかった。
+- background子が30秒後に終了してstderrを閉じた直後、portdeckは接続成功としてTUIをresumeした。
+- ControlMaster相当の状態は待機中から既に利用可能だった。
+
+これにより、`Command::output()`が接続用プロセスの終了後もstderr EOFを待つことと、当該descriptorの寿命がTUI復帰を直接遅延させることを確認した。
+
+### Isolated real OpenSSH
+
+隔離sshd統合テストを独自executorから本番の`SystemCommandExecutor`経路へ変更し、OpenSSH 9.6p1、公開鍵認証、`LogLevel DEBUG3`で確認した。
+
+- `ssh -M -N -f`は正常に戻った。
+- `-O check`、同一master上の複数forward、実TCP通信、個別cancel、`-O exit`まで成功した。
+- テスト全体は約0.33秒で完了し、通常のOpenSSH 9.6p1構成ではhangを再現しなかった。
+
+したがって、確認済みの待機機構は実在するが、通常構成の全OpenSSH接続で発生するわけではない。報告環境でbackground側にdescriptorが残る条件、またはresume済みだが旧描画のため復帰していないように見えた可能性を追加で切り分ける。
 
 ## Proposed direction
 

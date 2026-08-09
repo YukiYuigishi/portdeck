@@ -62,8 +62,12 @@ ControlMaster sockets are stored in:
 ```text
 $XDG_RUNTIME_DIR/portdeck/
 # When XDG_RUNTIME_DIR is unset:
-/tmp/portdeck-<uid>/
+<OS temporary directory>/portdeck-<uid>/
 ```
+
+The fallback uses the temporary directory selected by `std::env::temp_dir()`.
+On Linux this is normally `/tmp`, but it may differ according to the
+environment.
 
 The runtime directory must be absolute, owned by the current user, and a real
 directory rather than a symlink. portdeck restricts it to mode `0700`.

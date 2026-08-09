@@ -61,8 +61,10 @@ ControlPathは次のportdeck専用ディレクトリへ置きます。
 ```text
 $XDG_RUNTIME_DIR/portdeck/
 # XDG_RUNTIME_DIRが未設定の場合:
-/tmp/portdeck-<uid>/
+<OSのtemporary directory>/portdeck-<uid>/
 ```
+
+fallbackには`std::env::temp_dir()`が選ぶtemporary directoryを使います。Linuxでは通常`/tmp`ですが、環境によって異なる場合があります。
 
 `XDG_RUNTIME_DIR`を設定する場合は絶対パスである必要があります。runtimeディレクトリは実ディレクトリかつ現在のユーザー所有であることを確認し、mode `0700`に制限します。他ユーザー所有のパスやsymlinkなど安全に利用できないパスは拒否します。
 

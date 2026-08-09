@@ -78,4 +78,4 @@ Implemented in `4f1a8fd`.
 ## Verification
 
 - `./scripts/lint.sh`: passed
-- `cargo test --all-targets --all-features`: 72 unit, 3 CLI, 6 adapter tests passed; 2 opt-in OpenSSH integration tests ignored as designed
+- `cargo test --all-targets --all-features`: 73 unit, 3 CLI, 6 adapter tests passed; 2 opt-in OpenSSH integration tests ignored as designed

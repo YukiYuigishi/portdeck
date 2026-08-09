@@ -58,6 +58,7 @@ Vimの移動キーに慣れたユーザー向けに、通常画面で`h`をTarge
 ## Resolution
 
 Implemented in `84f88ab`.
+Empty-list navigation coverage added in `502c2f3`.
 
 - `h`/`←`はTargets、`l`/`→`はForwardsへ方向を指定して移動する。
 - `Tab`のトグルと`j`/`k`の上下移動を維持した。
@@ -66,4 +67,4 @@ Implemented in `84f88ab`.
 ## Verification
 
 - `./scripts/lint.sh`: passed
-- `cargo test --all-targets --all-features`: 72 unit, 3 CLI, 6 adapter tests passed; 2 opt-in OpenSSH integration tests ignored as designed
+- `cargo test --all-targets --all-features`: 73 unit, 3 CLI, 6 adapter tests passed; 2 opt-in OpenSSH integration tests ignored as designed

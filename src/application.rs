@@ -1247,7 +1247,9 @@ mod tests {
     use std::collections::VecDeque;
     use std::fs;
     use std::io;
+    use std::io::Write;
     use std::path::{Path, PathBuf};
+    use std::sync::{Arc, Mutex};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use crate::config::RuleStore;
@@ -1260,6 +1262,34 @@ mod tests {
     use super::{
         AppState, ForwardRuleDraft, PortProbe, RuleError, SessionManager, port_candidates,
     };
+
+    #[derive(Clone)]
+    struct CaptureWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for CaptureWriter {
+        fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buffer);
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn capture_debug_events(action: impl FnOnce()) -> String {
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let writer = Arc::clone(&captured);
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::DEBUG)
+            .with_writer(move || CaptureWriter(Arc::clone(&writer)))
+            .finish();
+        tracing::subscriber::with_default(subscriber, action);
+        let contents = captured.lock().unwrap().clone();
+        String::from_utf8(contents).unwrap()
+    }
 
     #[derive(Debug, Default)]
     struct FakeSsh {
@@ -1903,13 +1933,46 @@ mod tests {
         )
         .unwrap();
 
-        assert!(
-            app.add_rule(
-                &TargetId::new("dev"),
-                ForwardRuleDraft::parse("web", "", "", "", "3000").unwrap(),
-            )
-            .is_err()
-        );
+        let events = capture_debug_events(|| {
+            assert!(
+                app.add_rule(
+                    &TargetId::new("dev"),
+                    ForwardRuleDraft::parse("web", "", "", "", "3000").unwrap(),
+                )
+                .is_err()
+            );
+        });
         assert!(app.rules_for(&TargetId::new("dev")).is_empty());
+        assert!(events.contains("operation=\"save\""));
+        assert!(events.contains("operation=\"rollback_add_rule\""));
+        assert!(events.contains("operation_id"));
+    }
+
+    #[test]
+    fn debug_events_correlate_connect_forward_and_shutdown_without_raw_output() {
+        let test_runtime = TestRuntime::new();
+        let mut ssh = FakeSsh::successful();
+        ssh.forward.get_mut().push_back(success());
+        let mut manager = SessionManager::with_port_probe(
+            ssh,
+            test_runtime.runtime(),
+            vec![target()],
+            FakePortProbe::default(),
+        )
+        .unwrap();
+
+        let events = capture_debug_events(|| {
+            manager.connect(&TargetId::new("dev")).unwrap();
+            manager.activate_forward(&rule()).unwrap();
+            assert!(manager.shutdown_all().is_empty());
+        });
+
+        assert!(events.contains("operation=\"connect\""));
+        assert!(events.contains("operation=\"add_local_forward\""));
+        assert!(events.contains("operation=\"disconnect\""));
+        assert!(events.contains("operation_id"));
+        assert!(events.contains("elapsed_ms"));
+        assert!(!events.contains("OpenSSH_9.6p1"));
+        assert!(!events.contains("Permission denied"));
     }
 }

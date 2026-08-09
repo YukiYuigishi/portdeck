@@ -40,3 +40,15 @@ fn unknown_arguments_fail_with_a_clear_diagnostic() {
         "portdeck: unknown argument: --unsupported\n"
     );
 }
+
+#[test]
+fn duplicate_debug_arguments_are_rejected() {
+    let output = portdeck().args(["--debug", "--debug"]).output().unwrap();
+
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap(),
+        "portdeck: argument supplied more than once: --debug\n"
+    );
+}

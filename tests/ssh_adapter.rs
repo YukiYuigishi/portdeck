@@ -3,11 +3,15 @@
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use portdeck::ssh::{LocalForwardSpec, OpenSsh};
 
+static FAKE_SSH_LOCK: Mutex<()> = Mutex::new(());
+
 struct FakeSsh {
+    _lock: MutexGuard<'static, ()>,
     directory: PathBuf,
     executable: PathBuf,
     arguments_log: PathBuf,
@@ -15,6 +19,9 @@ struct FakeSsh {
 
 impl FakeSsh {
     fn new(exit_code: u8) -> Self {
+        let lock = FAKE_SSH_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -24,17 +31,20 @@ impl FakeSsh {
         fs::create_dir(&directory).unwrap();
 
         let executable = directory.join("ssh");
+        let temporary_executable = directory.join("ssh.tmp");
         let arguments_log = directory.join("arguments");
         let script = format!(
             "#!/bin/sh\n: > '{log}'\nfor argument in \"$@\"; do\n  printf '%s\\n' \"$argument\" >> '{log}'\ndone\nprintf 'fake stdout\\n'\nprintf 'fake stderr\\n' >&2\nexit {exit_code}\n",
             log = arguments_log.display()
         );
-        fs::write(&executable, script).unwrap();
-        let mut permissions = fs::metadata(&executable).unwrap().permissions();
+        fs::write(&temporary_executable, script).unwrap();
+        let mut permissions = fs::metadata(&temporary_executable).unwrap().permissions();
         permissions.set_mode(0o700);
-        fs::set_permissions(&executable, permissions).unwrap();
+        fs::set_permissions(&temporary_executable, permissions).unwrap();
+        fs::rename(&temporary_executable, &executable).unwrap();
 
         Self {
+            _lock: lock,
             directory,
             executable,
             arguments_log,

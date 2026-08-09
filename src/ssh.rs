@@ -3,9 +3,13 @@
 //! Commands in this module are passed as argument vectors without a shell.
 
 use std::ffi::OsString;
+use std::fs::{self, File, OpenOptions};
 use std::io;
+use std::os::unix::fs::{FileExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use thiserror::Error;
 
@@ -153,6 +157,74 @@ pub trait CommandExecutor {
 #[derive(Debug, Default, Clone, Copy)]
 pub struct SystemCommandExecutor;
 
+static NEXT_STDERR_FILE_ID: AtomicU64 = AtomicU64::new(0);
+const STDERR_FILE_CREATE_ATTEMPTS: usize = 128;
+const STDERR_READ_BUFFER_SIZE: usize = 8 * 1024;
+
+fn private_unlinked_stderr_file() -> io::Result<File> {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+
+    for _ in 0..STDERR_FILE_CREATE_ATTEMPTS {
+        let sequence = NEXT_STDERR_FILE_ID.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            ".portdeck-stderr-{}-{nonce}-{sequence}",
+            std::process::id()
+        ));
+        match OpenOptions::new()
+            .create_new(true)
+            .read(true)
+            .write(true)
+            .mode(0o600)
+            .open(&path)
+        {
+            Ok(file) => {
+                if let Err(source) = fs::remove_file(&path) {
+                    drop(file);
+                    let _ = fs::remove_file(path);
+                    return Err(source);
+                }
+                return Ok(file);
+            }
+            Err(source) if source.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(source) => return Err(source),
+        }
+    }
+
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "could not create a unique temporary file for OpenSSH stderr",
+    ))
+}
+
+fn captured_stderr(file: &File) -> io::Result<Vec<u8>> {
+    let length = file.metadata()?.len();
+    let capacity = usize::try_from(length)
+        .map_err(|_| io::Error::other("OpenSSH stderr is too large to capture"))?;
+    let mut contents = Vec::with_capacity(capacity);
+    let mut buffer = [0_u8; STDERR_READ_BUFFER_SIZE];
+    let mut offset = 0_u64;
+
+    while offset < length {
+        let remaining = length - offset;
+        let read_length = usize::try_from(remaining.min(STDERR_READ_BUFFER_SIZE as u64))
+            .expect("stderr read length always fits usize");
+        match file.read_at(&mut buffer[..read_length], offset) {
+            Ok(0) => break,
+            Ok(count) => {
+                contents.extend_from_slice(&buffer[..count]);
+                offset += u64::try_from(count).expect("stderr read count always fits u64");
+            }
+            Err(source) if source.kind() == io::ErrorKind::Interrupted => {}
+            Err(source) => return Err(source),
+        }
+    }
+
+    Ok(contents)
+}
+
 impl CommandExecutor for SystemCommandExecutor {
     fn execute(&self, command: &SshCommand, mode: ExecutionMode) -> io::Result<SshOutput> {
         let mut process = Command::new(command.program());
@@ -169,16 +241,18 @@ impl CommandExecutor for SystemCommandExecutor {
                 })
             }
             ExecutionMode::Interactive => {
-                let output = process
+                let stderr_file = private_unlinked_stderr_file()?;
+                let status = process
                     .stdin(Stdio::inherit())
                     .stdout(Stdio::inherit())
-                    .stderr(Stdio::piped())
-                    .output()?;
+                    .stderr(Stdio::from(stderr_file.try_clone()?))
+                    .status()?;
+                let stderr = captured_stderr(&stderr_file)?;
                 Ok(SshOutput {
-                    success: output.status.success(),
-                    exit_code: output.status.code(),
+                    success: status.success(),
+                    exit_code: status.code(),
                     stdout: String::new(),
-                    stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+                    stderr: String::from_utf8_lossy(&stderr).into_owned(),
                 })
             }
         }

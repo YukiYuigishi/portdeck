@@ -2,7 +2,7 @@
 
 ## Current Status
 
-portdeck 0.1.0のMVP実装を完了。OpenSSH 9.6p1を使った隔離sshd統合テストで、ControlMaster、同一master上の複数転送、実TCP通信、個別取消、終了を確認済み。
+portdeck 0.1.0のMVP実装を完了。OpenSSH 9.6p1を使った隔離sshd統合テストで、ControlMaster、Local転送、direct／ProxyJumpのSOCKS5転送、実TCP通信、個別取消、終了を確認済み。
 
 Phase 9のうち、複数OpenSSHバージョンと実接続先を使う認証・ProxyJump・ホスト鍵の互換性マトリクスは継続課題として残す。これは現在のMVP実装範囲を広げるものではない。
 
@@ -13,7 +13,7 @@ MVPは、Linux上でシステムOpenSSHのControlMasterを管理し、TUIから 
 - 各フェーズは、完了条件を満たしてから次へ進む。
 - 最初にOpenSSH制御部分をCLIまたはテストから検証し、TUIはその後に載せる。
 - ユーザーの実SSH環境に依存するテストと、偽 `ssh` を使う再現可能なテストを分ける。
-- MVP完了までMosh、リモートポート自動検出、`-R`、`-D`、TLS処理へ範囲を広げない。
+- MVP完了までMosh、リモートポート自動検出、`-R`、TLS処理へ範囲を広げない。MVP完了後の利用要求を受け、OpenSSH `-D`は追加済み。
 
 ## Development Commands
 
@@ -233,8 +233,8 @@ MVP完了後、利用上の必要性を確認して着手する。
 ### Additional SSH Forward Types
 
 - [ ] 利用要求が確認できた場合に限り `-R` を検討する。
-- [ ] 利用要求が確認できた場合に限り `-D` を検討する。
-- [ ] 外部公開範囲とサーバー側ポリシーを個別に設計する。
+- [x] 利用要求に基づき、OpenSSH `-D`によるSOCKS転送を追加する。
+- [x] Local／SOCKSそれぞれの外部公開警告を実装する。
 
 ## Deferred Decisions
 

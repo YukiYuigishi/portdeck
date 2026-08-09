@@ -31,7 +31,7 @@ fn run() -> Result<()> {
         }
         [argument] if matches!(argument.as_str(), "-h" | "--help") => {
             println!(
-                "portdeck {version}\n\nSSH connection and local-forward manager\n\nUSAGE:\n    portdeck [--diagnose | --version | --help]"
+                "portdeck {version}\n\nSSH connection and forwarding manager\n\nUSAGE:\n    portdeck [--diagnose | --version | --help]"
             );
             Ok(())
         }

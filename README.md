@@ -1,6 +1,6 @@
 # portdeck
 
-portdeckは、システムのOpenSSH接続とローカルポートフォワードを管理するLinux向けTUIです。`~/.ssh/config`から接続先を選び、専用ControlMasterの開始・状態確認・終了と、`ssh -L`相当の転送の保存・追加・取消を一画面で扱えます。
+portdeckは、システムのOpenSSH接続とLocal／SOCKS転送を管理するLinux向けTUIです。`~/.ssh/config`から接続先を選び、専用ControlMasterの開始・状態確認・終了と、`ssh -L`／`ssh -D`相当の転送の保存・追加・取消を一画面で扱えます。
 
 SSHプロトコル、認証、暗号化、ホスト鍵確認、ProxyJump、TCP中継はOpenSSHへ委譲します。portdeckは汎用ターミナル、SSH鍵管理ツール、独自プロキシではありません。
 
@@ -47,17 +47,18 @@ portdeck
 
 ### Add a forward
 
-`a`を押し、次の項目を入力します。`Tab`または`↑`/`↓`で項目を移動し、`Enter`で保存します。
+`a`を押し、次の項目を入力します。`Tab`または`↑`/`↓`で項目を移動し、`Enter`で保存します。先頭のForward kindは`←`/`→`、`l`、`s`で切り替えます。
 
+- Forward kind: `Local`（OpenSSH `-L`）または`SOCKS`（OpenSSH `-D`）
 - Label: 任意の表示名
 - Local bind address: 既定値`127.0.0.1`
-- Preferred local port: 空欄ならリモート宛先ポートと同じ番号
-- Remote destination host: リモート側から見た宛先。既定値`127.0.0.1`
-- Remote destination port: 必須、1から65535
+- Preferred local port: Localで空欄ならリモート宛先ポート、SOCKSでは既定値`1080`
+- Remote destination host: Localだけで使用。リモート側から見た宛先。既定値`127.0.0.1`
+- Remote destination port: Localだけで使用。必須、1から65535
 
 保存しただけでは転送は有効になりません。Forwardsペインでルールを選択し、`Space`を押してください。希望ポートが競合する場合は最大20個の連続した候補を試し、OpenSSHが実際に追加できたローカルポートを表示します。
 
-`0.0.0.0`、`::`、`*`へのbindはローカルネットワークなどへ公開される可能性があるため、保存前に追加確認を表示します。
+`0.0.0.0`、`::`、`*`へのbindはローカルネットワークなどへ公開される可能性があるため、保存前に追加確認を表示します。SOCKS listenerにはportdeck独自の認証がないため、外部公開時は接続可能な利用者がSSH経由で任意の宛先へ通信できることを明示して警告します。
 
 ### Edit a forward
 
@@ -88,8 +89,16 @@ id = "rule-00000001"
 label = "web"
 bind_address = "127.0.0.1"
 requested_local_port = 8080
+kind = "local"
 remote_host = "127.0.0.1"
 remote_port = 3000
+
+[[targets.forwards]]
+id = "rule-00000002"
+label = "browser-proxy"
+bind_address = "127.0.0.1"
+requested_local_port = 1080
+kind = "socks"
 ```
 
 実行中のセッション状態、実際に選ばれたポート、PID、認証情報は保存しません。再起動時にルールは表示されますが、自動接続・自動有効化は行いません。
@@ -105,6 +114,7 @@ ControlPathは`$XDG_RUNTIME_DIR/portdeck/`に置きます。`XDG_RUNTIME_DIR`が
 - パスワード、秘密鍵、鍵パスフレーズを取得・保存・ログ出力しません。
 - ユーザーの`~/.ssh/config`、`known_hosts`、秘密鍵を変更しません。
 - 専用masterでは`ClearAllForwardings=yes`を使い、SSH設定由来の未追跡forwardを混在させません。
+- SOCKS4/5処理とTCP中継は`ssh -D`へ委譲し、portdeck内にproxyを実装しません。
 - 追加・取消の最終成否はOpenSSHの終了ステータスで判定します。事前のport bind確認だけで`Active`にはしません。
 - 通常終了時はportdeckが所有する全ControlMasterを確認して終了します。TUIを閉じた後も接続を残すdetach機能はありません。
 
@@ -113,7 +123,7 @@ ControlPathは`$XDG_RUNTIME_DIR/portdeck/`に置きます。`XDG_RUNTIME_DIR`が
 - 接続先がない: `~/.ssh/config`にワイルドカードではない`Host <alias>`があるか、`Include`先を読めるか確認してください。
 - OpenSSHを起動できない: `portdeck --diagnose`と`ssh -V`を確認してください。
 - 接続・認証に失敗する: `E`でOpenSSH stderrを表示し、同じaliasに`ssh <alias>`で接続できるか確認してください。portdeckは認証方式やホスト鍵設定を緩和して再試行しません。
-- 転送を追加できない: ローカルポート競合、サーバーの`AllowTcpForwarding`、リモート宛先を確認してください。
+- 転送を追加できない: ローカルポート競合、サーバーの`AllowTcpForwarding`、Localの場合はリモート宛先も確認してください。
 - 状態が古い: `r`でControlMasterを再確認してください。切断を検出すると配下の転送も`Unavailable`になります。
 - 設定ファイルが壊れている: portdeckはファイルを上書きせず、パース診断を表示して終了します。内容を修正してから再起動してください。
 
@@ -127,7 +137,7 @@ cargo test --all-targets --all-features
 
 インストールしたpre-commit hookとGitHub Actionsは同じlintスクリプトを使います。hookを通さず意図的にコミットする必要がある場合も、変更を共有する前に上記チェックを手動で実行してください。
 
-偽`ssh`を使うadapter testsは通常のテストに含まれます。実sshd、隔離したhost/client key、専用`known_hosts`、実TCP通信を使う統合テストは明示的に実行します。
+偽`ssh`を使うadapter testsは通常のテストに含まれます。実sshd、隔離したhost/client key、専用`known_hosts`、Local実TCP通信、direct／ProxyJumpのSOCKS5通信を使う統合テストは明示的に実行します。
 
 ```console
 cargo test --test openssh_integration -- --ignored --nocapture

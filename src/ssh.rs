@@ -89,6 +89,53 @@ impl LocalForwardSpec {
     }
 }
 
+/// Validated and normalized OpenSSH `-D` value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DynamicForwardSpec {
+    bind_address: String,
+    local_port: u16,
+}
+
+impl DynamicForwardSpec {
+    /// Validates a dynamic-forward listener.
+    pub fn new(bind_address: impl Into<String>, local_port: u16) -> Result<Self, InputError> {
+        if local_port == 0 {
+            return Err(InputError::ZeroPort {
+                field: "local port",
+            });
+        }
+        let bind_address = normalize_forward_host(&bind_address.into(), "bind address")?;
+        Ok(Self {
+            bind_address,
+            local_port,
+        })
+    }
+
+    /// Address on the local side where OpenSSH listens.
+    pub fn bind_address(&self) -> &str {
+        &self.bind_address
+    }
+
+    /// Port on the local side where OpenSSH listens.
+    pub fn local_port(&self) -> u16 {
+        self.local_port
+    }
+
+    /// Returns the exact value passed after `-D` for add and cancel.
+    pub fn as_argument(&self) -> String {
+        format!(
+            "{}:{}",
+            format_forward_host(&self.bind_address),
+            self.local_port
+        )
+    }
+
+    /// Returns whether the bind explicitly exposes the listener beyond loopback.
+    pub fn is_public_bind(&self) -> bool {
+        matches!(self.bind_address.as_str(), "0.0.0.0" | "::" | "*")
+    }
+}
+
 /// A process invocation ready to execute without a shell.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SshCommand {
@@ -290,6 +337,20 @@ pub trait SshClient {
         control_path: &Path,
         forward: &LocalForwardSpec,
     ) -> Result<SshOutput, SshError>;
+    /// Adds one OpenSSH-managed SOCKS listener.
+    fn add_dynamic_forward(
+        &self,
+        host_alias: &str,
+        control_path: &Path,
+        forward: &DynamicForwardSpec,
+    ) -> Result<SshOutput, SshError>;
+    /// Cancels one exact OpenSSH-managed SOCKS listener.
+    fn cancel_dynamic_forward(
+        &self,
+        host_alias: &str,
+        control_path: &Path,
+        forward: &DynamicForwardSpec,
+    ) -> Result<SshOutput, SshError>;
     /// Stops a dedicated ControlMaster.
     fn disconnect(&self, host_alias: &str, control_path: &Path) -> Result<SshOutput, SshError>;
 }
@@ -370,7 +431,8 @@ impl<E: CommandExecutor> OpenSsh<E> {
             host_alias,
             control_path,
             "forward",
-            forward,
+            "-L",
+            forward.as_argument(),
         ))
     }
 
@@ -386,7 +448,42 @@ impl<E: CommandExecutor> OpenSsh<E> {
             host_alias,
             control_path,
             "cancel",
-            forward,
+            "-L",
+            forward.as_argument(),
+        ))
+    }
+
+    /// Adds one dynamic forward to a dedicated ControlMaster.
+    pub fn add_dynamic_forward(
+        &self,
+        host_alias: &str,
+        control_path: &Path,
+        forward: &DynamicForwardSpec,
+    ) -> Result<SshOutput, SshError> {
+        validate_host_alias(host_alias)?;
+        self.capture(forward_operation_arguments(
+            host_alias,
+            control_path,
+            "forward",
+            "-D",
+            forward.as_argument(),
+        ))
+    }
+
+    /// Cancels the exact normalized dynamic forward previously added.
+    pub fn cancel_dynamic_forward(
+        &self,
+        host_alias: &str,
+        control_path: &Path,
+        forward: &DynamicForwardSpec,
+    ) -> Result<SshOutput, SshError> {
+        validate_host_alias(host_alias)?;
+        self.capture(forward_operation_arguments(
+            host_alias,
+            control_path,
+            "cancel",
+            "-D",
+            forward.as_argument(),
         ))
     }
 
@@ -452,6 +549,24 @@ impl<E: CommandExecutor> SshClient for OpenSsh<E> {
         forward: &LocalForwardSpec,
     ) -> Result<SshOutput, SshError> {
         OpenSsh::cancel_local_forward(self, host_alias, control_path, forward)
+    }
+
+    fn add_dynamic_forward(
+        &self,
+        host_alias: &str,
+        control_path: &Path,
+        forward: &DynamicForwardSpec,
+    ) -> Result<SshOutput, SshError> {
+        OpenSsh::add_dynamic_forward(self, host_alias, control_path, forward)
+    }
+
+    fn cancel_dynamic_forward(
+        &self,
+        host_alias: &str,
+        control_path: &Path,
+        forward: &DynamicForwardSpec,
+    ) -> Result<SshOutput, SshError> {
+        OpenSsh::cancel_dynamic_forward(self, host_alias, control_path, forward)
     }
 
     fn disconnect(&self, host_alias: &str, control_path: &Path) -> Result<SshOutput, SshError> {
@@ -586,7 +701,8 @@ fn forward_operation_arguments(
     host_alias: &str,
     control_path: &Path,
     operation: &str,
-    forward: &LocalForwardSpec,
+    flag: &str,
+    specification: String,
 ) -> Vec<OsString> {
     vec![
         OsString::from("-S"),
@@ -595,8 +711,8 @@ fn forward_operation_arguments(
         OsString::from("ClearAllForwardings=no"),
         OsString::from("-O"),
         OsString::from(operation),
-        OsString::from("-L"),
-        OsString::from(forward.as_argument()),
+        OsString::from(flag),
+        OsString::from(specification),
         OsString::from(host_alias),
     ]
 }
@@ -610,8 +726,8 @@ mod tests {
     use std::path::Path;
 
     use super::{
-        CommandExecutor, ExecutionMode, InputError, LocalForwardSpec, OpenSsh, SshCommand,
-        SshOutput, private_unlinked_stderr_file, validate_host_alias,
+        CommandExecutor, DynamicForwardSpec, ExecutionMode, InputError, LocalForwardSpec, OpenSsh,
+        SshCommand, SshOutput, private_unlinked_stderr_file, validate_host_alias,
     };
 
     #[derive(Debug, Default)]
@@ -723,6 +839,69 @@ mod tests {
 
         assert_eq!(ipv4.as_argument(), "127.0.0.1:5432:db.internal:5432");
         assert_eq!(ipv6.as_argument(), "[::1]:8443:[2001:db8::1]:443");
+    }
+
+    #[test]
+    fn builds_dynamic_forward_and_cancel_with_the_same_normalized_spec() {
+        let executor = RecordingExecutor::default();
+        let ssh = OpenSsh::with_executor("ssh", executor);
+        let forward = DynamicForwardSpec::new("[::1]", 1080).unwrap();
+
+        ssh.add_dynamic_forward("dev", Path::new("control"), &forward)
+            .unwrap();
+        ssh.cancel_dynamic_forward("dev", Path::new("control"), &forward)
+            .unwrap();
+
+        let calls = ssh.executor.calls.borrow();
+        assert_eq!(
+            string_arguments(&calls[0].0),
+            [
+                "-S",
+                "control",
+                "-o",
+                "ClearAllForwardings=no",
+                "-O",
+                "forward",
+                "-D",
+                "[::1]:1080",
+                "dev",
+            ]
+        );
+        assert_eq!(
+            string_arguments(&calls[1].0),
+            [
+                "-S",
+                "control",
+                "-o",
+                "ClearAllForwardings=no",
+                "-O",
+                "cancel",
+                "-D",
+                "[::1]:1080",
+                "dev",
+            ]
+        );
+    }
+
+    #[test]
+    fn normalizes_and_classifies_dynamic_forward_binds() {
+        assert_eq!(
+            DynamicForwardSpec::new("127.0.0.1", 1080)
+                .unwrap()
+                .as_argument(),
+            "127.0.0.1:1080"
+        );
+        assert_eq!(
+            DynamicForwardSpec::new("::1", 1081).unwrap().as_argument(),
+            "[::1]:1081"
+        );
+        for address in ["0.0.0.0", "::", "*"] {
+            assert!(
+                DynamicForwardSpec::new(address, 1080)
+                    .unwrap()
+                    .is_public_bind()
+            );
+        }
     }
 
     #[test]

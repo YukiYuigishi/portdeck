@@ -172,7 +172,39 @@ impl Session {
     }
 }
 
-/// Persistent local-forward definition belonging to a target.
+/// OpenSSH forwarding capability used by a saved rule.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ForwardKind {
+    /// A fixed local listener and remote-side destination (`ssh -L`).
+    Local {
+        /// Host reached from the remote side.
+        remote_host: String,
+        /// Port reached from the remote side.
+        remote_port: u16,
+    },
+    /// A local SOCKS4/5 listener implemented by OpenSSH (`ssh -D`).
+    Socks,
+}
+
+/// Runtime forwarding capability paired with an exact normalized specification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActiveForwardKind {
+    /// OpenSSH local forwarding (`-L`).
+    Local,
+    /// OpenSSH dynamic forwarding (`-D`).
+    Socks,
+}
+
+impl From<&ForwardKind> for ActiveForwardKind {
+    fn from(kind: &ForwardKind) -> Self {
+        match kind {
+            ForwardKind::Local { .. } => Self::Local,
+            ForwardKind::Socks => Self::Socks,
+        }
+    }
+}
+
+/// Persistent forwarding definition belonging to a target.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ForwardRule {
     /// Stable saved-rule identifier.
@@ -183,12 +215,20 @@ pub struct ForwardRule {
     pub label: Option<String>,
     /// Address on the local side where OpenSSH listens.
     pub bind_address: String,
-    /// Preferred local port, or the remote port when omitted.
+    /// Preferred local port, or the forwarding-kind default when omitted.
     pub requested_local_port: Option<u16>,
-    /// Host reached from the remote side.
-    pub remote_host: String,
-    /// Port reached from the remote side.
-    pub remote_port: u16,
+    /// Explicit forwarding capability and its kind-specific values.
+    pub kind: ForwardKind,
+}
+
+impl ForwardRule {
+    /// First local port considered when activating this rule.
+    pub fn default_local_port(&self) -> u16 {
+        self.requested_local_port.unwrap_or(match self.kind {
+            ForwardKind::Local { remote_port, .. } => remote_port,
+            ForwardKind::Socks => 1080,
+        })
+    }
 }
 
 /// Runtime state associated with a saved forward rule.
@@ -200,6 +240,8 @@ pub struct ActiveForward {
     pub actual_local_port: Option<u16>,
     /// Exact normalized `-L` value used for add and cancel.
     pub normalized_spec: Option<String>,
+    /// Forwarding capability used to install `normalized_spec`.
+    pub kind: Option<ActiveForwardKind>,
     /// Current runtime state.
     pub state: ForwardState,
     /// Most recent operation failure.
@@ -213,6 +255,7 @@ impl ActiveForward {
             rule_id,
             actual_local_port: None,
             normalized_spec: None,
+            kind: None,
             state: ForwardState::Inactive,
             last_error: None,
         }
@@ -234,6 +277,7 @@ impl ActiveForward {
         if next == ForwardState::Inactive {
             self.actual_local_port = None;
             self.normalized_spec = None;
+            self.kind = None;
         }
         Ok(())
     }
@@ -242,10 +286,12 @@ impl ActiveForward {
     pub fn activate(
         &mut self,
         actual_local_port: u16,
+        kind: ActiveForwardKind,
         normalized_spec: String,
     ) -> Result<(), TransitionError> {
         self.transition(ForwardState::Active)?;
         self.actual_local_port = Some(actual_local_port);
+        self.kind = Some(kind);
         self.normalized_spec = Some(normalized_spec);
         Ok(())
     }
@@ -312,8 +358,8 @@ mod tests {
     use std::path::PathBuf;
 
     use super::{
-        ActiveForward, Failure, FailureKind, ForwardRuleId, ForwardState, Session, SessionState,
-        TargetId,
+        ActiveForward, ActiveForwardKind, Failure, FailureKind, ForwardRuleId, ForwardState,
+        Session, SessionState, TargetId,
     };
 
     #[test]
@@ -373,7 +419,11 @@ mod tests {
         assert_eq!(forward.actual_local_port, None);
 
         forward
-            .activate(8081, "127.0.0.1:8081:127.0.0.1:3000".to_owned())
+            .activate(
+                8081,
+                ActiveForwardKind::Local,
+                "127.0.0.1:8081:127.0.0.1:3000".to_owned(),
+            )
             .unwrap();
 
         assert_eq!(forward.state, ForwardState::Active);
@@ -385,7 +435,11 @@ mod tests {
         let mut forward = ActiveForward::new(ForwardRuleId::new("web"));
         forward.transition(ForwardState::Adding).unwrap();
         forward
-            .activate(8080, "127.0.0.1:8080:127.0.0.1:3000".to_owned())
+            .activate(
+                8080,
+                ActiveForwardKind::Local,
+                "127.0.0.1:8080:127.0.0.1:3000".to_owned(),
+            )
             .unwrap();
 
         forward.transition(ForwardState::Removing).unwrap();
@@ -401,7 +455,11 @@ mod tests {
         let mut forward = ActiveForward::new(ForwardRuleId::new("db"));
         forward.transition(ForwardState::Adding).unwrap();
         forward
-            .activate(5432, "127.0.0.1:5432:db:5432".to_owned())
+            .activate(
+                5432,
+                ActiveForwardKind::Local,
+                "127.0.0.1:5432:db:5432".to_owned(),
+            )
             .unwrap();
 
         forward.transition(ForwardState::Unavailable).unwrap();

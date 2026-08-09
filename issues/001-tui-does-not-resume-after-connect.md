@@ -87,6 +87,20 @@ stderr(Stdio::piped()).output()
 
 これにより、報告された症状と同じ停止をOpenSSH 9.6p1の実ProxyJumpで再現した。現状のportdeckはProxyJumpの設定解決と接続開始まではOpenSSHへ正しく委譲するが、接続後にTUIへ復帰できないため、ProxyJump接続を正常利用できる状態ではない。
 
+### Actual `ksl-pc` target
+
+2026-08-09、ユーザーの実接続先`ksl-pc`をportdeckから選択して`c`を押し、end-to-endで確認した。ユーザーのSSH設定、known_hosts、秘密鍵は変更していない。
+
+- `ssh -G ksl-pc`の有効値は`HostName 192.168.0.83`、`ProxyJump ksl-ns`だった。
+- 認証と接続は成功し、専用ControlMasterが起動した。
+- 別プロセスから同じControlPathへ`ssh -O check ksl-pc`を実行すると、masterが稼働中であることを確認できた。
+- 接続用の親`ssh`は終了していたが、ProxyJump用の`ssh -W [192.168.0.83]:22 ksl-ns`が生存していた。
+- portdeckが読むstderr pipeと、ProxyJump用`ssh -W`のstderrが同じpipeだった。このため`Command::output()`がEOFを待ち、TUIをresumeしなかった。
+- 別プロセスから`ssh -O exit ksl-pc`を実行すると待機が解除され、TUIは自動的にresumeした。
+- 検証用ControlMaster、ProxyJumpプロセス、ControlPathを終了・回収した。
+
+`ksl-pc`での症状は接続・認証の失敗ではなく、成功済みのProxyJump接続がstderr descriptorを保持することで発生するTUI復帰待ちである。復帰のために`Ctrl-C`を押す必要はなく、押した場合は正常な接続を中断してしまう。
+
 ## Proposed direction
 
 - interactive接続ではpipeのEOFではなく、接続用OpenSSHプロセスの終了ステータスを待つ。

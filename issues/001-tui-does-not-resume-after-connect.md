@@ -30,7 +30,7 @@ TUIで接続先を選択して`c`を押すと、認証・接続用に通常画�
 
 - OpenSSHの接続用プロセスが成功または失敗したら、TUIを自動的にresumeする。
 - 成功時は`Connected`を表示し、保存済みルールを選択して`Space`で転送を有効化できる。
-- 失敗時もTUIへ戻り、短い要約と`e`で確認できるOpenSSH stderrを表示する。
+- 失敗時もTUIへ戻り、短い要約と`E`で確認できるOpenSSH stderrを表示する。
 - 復帰に`Ctrl-C`を必要としない。
 
 ## Ctrl-C semantics
@@ -131,7 +131,7 @@ stderr(Stdio::piped()).output()
 - [x] 認証失敗・接続失敗後にもTUIへ自動復帰する。
 - [x] パスフレーズ、初回ホスト鍵確認、keyboard-interactiveで端末入力できる。
 - [x] 成功後に保存済みルールを`Space`で有効化できる。
-- [x] 失敗時のOpenSSH stderrを`e`で確認できる。
+- [x] 失敗時のOpenSSH stderrを`E`で確認できる。
 - [x] background processがstderr descriptorを保持するケースの回帰テストがある。
 - [x] 実ProxyJump経由の接続後にTUIへ自動復帰する。
 - [x] TUI復帰後に画面全体が正しくredrawされる。

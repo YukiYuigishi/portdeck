@@ -1,6 +1,6 @@
 # Filter targets by host alias with `/`
 
-- Status: Proposed
+- Status: Resolved
 - Priority: Medium
 - Reported: 2026-08-09
 - Component: `tui`
@@ -57,11 +57,25 @@ MVPでは、左ペインに表示している具体的なSSH Hostエイリアス
 
 ## Acceptance criteria
 
-- [ ] `/`でHostエイリアス検索を開始できる。
-- [ ] 入力に応じてTargetsが大文字小文字を区別せず部分一致で更新される。
-- [ ] `Enter`で確定、`Esc`で編集取消、空検索の確定で全件表示へ戻れる。
-- [ ] 検索結果の選択と右ペインの転送ルールが同じ接続先を参照する。
-- [ ] 0件でもpanicせず、該当なしと明示される。
-- [ ] 絞り込み後も既存の接続・確認・切断操作を実行できる。
-- [ ] 検索はSSH設定と本ツールの永続設定を変更しない。
-- [ ] TUIのイベント遷移と固定サイズ描画に回帰テストがある。
+- [x] `/`でHostエイリアス検索を開始できる。
+- [x] 入力に応じてTargetsが大文字小文字を区別せず部分一致で更新される。
+- [x] `Enter`で確定、`Esc`で編集取消、空検索の確定で全件表示へ戻れる。
+- [x] 検索結果の選択と右ペインの転送ルールが同じ接続先を参照する。
+- [x] 0件でもpanicせず、該当なしと明示される。
+- [x] 絞り込み後も既存の接続・確認・切断操作を実行できる。
+- [x] 検索はSSH設定と本ツールの永続設定を変更しない。
+- [x] TUIのイベント遷移と固定サイズ描画に回帰テストがある。
+
+## Resolution
+
+Implemented in `4f1a8fd`.
+
+- `/`で検索モードへ入り、Hostエイリアスを大文字小文字を区別しない部分一致でライブ絞り込みする。
+- 確定済みフィルターと検索開始時のTargetIdをTUI状態だけに保持し、`Enter`、`Esc`、空検索で選択を適切に復元する。
+- 描画と接続・確認・切断コマンドは、すべて同じ絞り込み後のTargetId解決を使用する。
+- 0件のメッセージ、検索文字列と一致件数、小さい端末の描画を回帰テストした。
+
+## Verification
+
+- `./scripts/lint.sh`: passed
+- `cargo test --all-targets --all-features`: 73 unit, 3 CLI, 6 adapter tests passed; 2 opt-in OpenSSH integration tests ignored as designed

@@ -184,6 +184,47 @@ impl<B: SshClient, P: PortProbe> AppState<B, P> {
         Ok(id)
     }
 
+    /// Returns a saved rule only when it has no runtime forwarding data.
+    pub fn editable_rule(&self, rule_id: &ForwardRuleId) -> Result<&ForwardRule, AppActionError> {
+        let rule = self.find_rule(rule_id)?;
+        self.ensure_rule_is_inactive(rule)?;
+        Ok(rule)
+    }
+
+    /// Replaces the editable fields of one inactive saved rule.
+    pub fn update_rule(
+        &mut self,
+        rule_id: &ForwardRuleId,
+        draft: ForwardRuleDraft,
+    ) -> Result<(), AppActionError> {
+        let current = self.editable_rule(rule_id)?.clone();
+        let target_id = current.target_id.clone();
+        let rules = self
+            .rules
+            .get_mut(&target_id)
+            .expect("the selected rule's target exists");
+        let index = rules
+            .iter()
+            .position(|rule| &rule.id == rule_id)
+            .expect("the selected rule exists");
+        rules[index] = ForwardRule {
+            id: current.id.clone(),
+            target_id: current.target_id.clone(),
+            label: draft.label,
+            bind_address: draft.bind_address,
+            requested_local_port: draft.requested_local_port,
+            remote_host: draft.remote_host,
+            remote_port: draft.remote_port,
+        };
+        if let Err(error) = self.persist_rules() {
+            self.rules
+                .get_mut(&target_id)
+                .expect("the selected rule's target exists")[index] = current;
+            return Err(error.into());
+        }
+        Ok(())
+    }
+
     /// Activates one saved rule.
     pub fn activate_rule(&mut self, rule_id: &ForwardRuleId) -> Result<u16, AppActionError> {
         let rule = self.find_rule(rule_id)?.clone();
@@ -247,6 +288,20 @@ impl<B: SshClient, P: PortProbe> AppState<B, P> {
             .ok_or_else(|| AppActionError::Rule(RuleError::UnknownRule(rule_id.clone())))
     }
 
+    fn ensure_rule_is_inactive(&self, rule: &ForwardRule) -> Result<(), AppActionError> {
+        if let Some(runtime) = self
+            .sessions
+            .entry(&rule.target_id)
+            .and_then(|entry| entry.forwards.get(&rule.id))
+            && (runtime.state != ForwardState::Inactive
+                || runtime.actual_local_port.is_some()
+                || runtime.normalized_spec.is_some())
+        {
+            return Err(RuleError::RuleNotEditable(rule.id.clone()).into());
+        }
+        Ok(())
+    }
+
     fn next_rule_id(&mut self) -> ForwardRuleId {
         loop {
             let id = ForwardRuleId::new(format!("rule-{:08}", self.next_rule_number));
@@ -304,6 +359,12 @@ pub enum RuleError {
     /// Definition deletion would conceal a possibly active OpenSSH forward.
     #[error("forward rule {} still has runtime state", .0.as_str())]
     RuleStillActive(ForwardRuleId),
+    /// Definition editing requires cancellation of all runtime state first.
+    #[error(
+        "転送ルール {} は実行状態が残っています。Spaceで転送を取消してから編集してください",
+        .0.as_str()
+    )]
+    RuleNotEditable(ForwardRuleId),
 }
 
 /// Error from a user-requested rule action.
@@ -1107,7 +1168,8 @@ mod tests {
     use crate::ssh::{LocalForwardSpec, SshClient, SshError, SshOutput};
 
     use super::{
-        AppState, ForwardRuleDraft, PortProbe, RuleError, SessionManager, port_candidates,
+        AppActionError, AppState, ForwardRuleDraft, PortProbe, RuleError, SessionManager,
+        port_candidates,
     };
 
     #[derive(Debug, Default)]
@@ -1678,6 +1740,148 @@ mod tests {
     }
 
     #[test]
+    fn inactive_rule_update_preserves_identity_target_and_order() {
+        let test_runtime = TestRuntime::new();
+        let manager = SessionManager::with_port_probe(
+            FakeSsh::successful(),
+            test_runtime.runtime(),
+            vec![target()],
+            FakePortProbe::default(),
+        )
+        .unwrap();
+        let original_id = ForwardRuleId::new("web");
+        let original = rule();
+        let mut second = rule();
+        second.id = ForwardRuleId::new("database");
+        let mut app = AppState::new(manager, vec![original, second.clone()]).unwrap();
+
+        app.update_rule(
+            &original_id,
+            ForwardRuleDraft::parse("edited web", "::1", "18080", "web.internal", "4000").unwrap(),
+        )
+        .unwrap();
+
+        let rules = app.rules_for(&TargetId::new("dev"));
+        assert_eq!(rules[0].id, original_id);
+        assert_eq!(rules[0].target_id, TargetId::new("dev"));
+        assert_eq!(rules[0].label.as_deref(), Some("edited web"));
+        assert_eq!(rules[0].bind_address, "::1");
+        assert_eq!(rules[0].requested_local_port, Some(18080));
+        assert_eq!(rules[0].remote_host, "web.internal");
+        assert_eq!(rules[0].remote_port, 4000);
+        assert_eq!(rules[1], second);
+    }
+
+    #[test]
+    fn runtime_state_or_forward_data_blocks_rule_editing() {
+        for state in [
+            ForwardState::Adding,
+            ForwardState::Active,
+            ForwardState::Removing,
+            ForwardState::Failed,
+            ForwardState::Unavailable,
+        ] {
+            let test_runtime = TestRuntime::new();
+            let mut manager = SessionManager::with_port_probe(
+                FakeSsh::successful(),
+                test_runtime.runtime(),
+                vec![target()],
+                FakePortProbe::default(),
+            )
+            .unwrap();
+            manager
+                .entries
+                .iter_mut()
+                .find(|entry| entry.target.id == TargetId::new("dev"))
+                .unwrap()
+                .forwards
+                .insert(
+                    ForwardRuleId::new("web"),
+                    crate::domain::ActiveForward {
+                        rule_id: ForwardRuleId::new("web"),
+                        actual_local_port: None,
+                        normalized_spec: None,
+                        state,
+                        last_error: None,
+                    },
+                );
+            let mut app = AppState::new(manager, vec![rule()]).unwrap();
+
+            let error = app
+                .update_rule(
+                    &ForwardRuleId::new("web"),
+                    ForwardRuleDraft::parse("edited", "", "", "", "4000").unwrap(),
+                )
+                .unwrap_err();
+
+            assert!(matches!(
+                error,
+                AppActionError::Rule(RuleError::RuleNotEditable(_))
+            ));
+            assert_eq!(
+                app.rules_for(&TargetId::new("dev"))[0].label.as_deref(),
+                Some("web")
+            );
+        }
+
+        let test_runtime = TestRuntime::new();
+        let mut manager = SessionManager::with_port_probe(
+            FakeSsh::successful(),
+            test_runtime.runtime(),
+            vec![target()],
+            FakePortProbe::default(),
+        )
+        .unwrap();
+        manager
+            .entries
+            .iter_mut()
+            .find(|entry| entry.target.id == TargetId::new("dev"))
+            .unwrap()
+            .forwards
+            .insert(
+                ForwardRuleId::new("web"),
+                crate::domain::ActiveForward {
+                    rule_id: ForwardRuleId::new("web"),
+                    actual_local_port: Some(8080),
+                    normalized_spec: Some("127.0.0.1:8080:127.0.0.1:3000".to_owned()),
+                    state: ForwardState::Inactive,
+                    last_error: None,
+                },
+            );
+        let app = AppState::new(manager, vec![rule()]).unwrap();
+        assert!(matches!(
+            app.editable_rule(&ForwardRuleId::new("web")),
+            Err(AppActionError::Rule(RuleError::RuleNotEditable(_)))
+        ));
+    }
+
+    #[test]
+    fn activation_after_edit_uses_the_new_forward_specification() {
+        let test_runtime = TestRuntime::new();
+        let manager = SessionManager::with_port_probe(
+            FakeSsh::successful(),
+            test_runtime.runtime(),
+            vec![target()],
+            FakePortProbe::default(),
+        )
+        .unwrap();
+        let mut app = AppState::new(manager, vec![rule()]).unwrap();
+        let id = ForwardRuleId::new("web");
+        app.update_rule(
+            &id,
+            ForwardRuleDraft::parse("edited", "::1", "18080", "db.internal", "5432").unwrap(),
+        )
+        .unwrap();
+        app.sessions_mut().connect(&TargetId::new("dev")).unwrap();
+
+        assert_eq!(app.activate_rule(&id).unwrap(), 18080);
+        assert_eq!(
+            app.sessions().ssh.forwarded_specs.borrow().as_slice(),
+            ["[::1]:18080:db.internal:5432"]
+        );
+    }
+
+    #[test]
     fn active_definition_cannot_be_deleted_until_cancel_succeeds() {
         let test_runtime = TestRuntime::new();
         let ssh = FakeSsh::successful();
@@ -1733,6 +1937,33 @@ mod tests {
     }
 
     #[test]
+    fn edited_definition_round_trips_through_attached_store() {
+        let test_runtime = TestRuntime::new();
+        let config_path = test_runtime.0.join("config/portdeck.toml");
+        let manager = SessionManager::with_port_probe(
+            FakeSsh::successful(),
+            test_runtime.runtime(),
+            vec![target()],
+            FakePortProbe::default(),
+        )
+        .unwrap();
+        let mut app =
+            AppState::with_store(manager, vec![rule()], RuleStore::at(&config_path)).unwrap();
+
+        app.update_rule(
+            &ForwardRuleId::new("web"),
+            ForwardRuleDraft::parse("database", "::1", "15432", "db.internal", "5432").unwrap(),
+        )
+        .unwrap();
+
+        let mut reloaded_store = RuleStore::at(&config_path);
+        assert_eq!(
+            reloaded_store.load(&[target()]).unwrap(),
+            app.rules_for(&TargetId::new("dev"))
+        );
+    }
+
+    #[test]
     fn failed_persistence_rolls_back_definition_mutation() {
         let test_runtime = TestRuntime::new();
         let blocked_parent = test_runtime.0.join("not-a-directory");
@@ -1760,5 +1991,35 @@ mod tests {
             .is_err()
         );
         assert!(app.rules_for(&TargetId::new("dev")).is_empty());
+    }
+
+    #[test]
+    fn failed_persistence_rolls_back_rule_update_in_place() {
+        let test_runtime = TestRuntime::new();
+        let blocked_parent = test_runtime.0.join("not-a-directory");
+        fs::write(&blocked_parent, "block directory creation").unwrap();
+        let manager = SessionManager::with_port_probe(
+            FakeSsh::successful(),
+            test_runtime.runtime(),
+            vec![target()],
+            FakePortProbe::default(),
+        )
+        .unwrap();
+        let original = rule();
+        let mut app = AppState::with_store(
+            manager,
+            vec![original.clone()],
+            RuleStore::at(blocked_parent.join("config.toml")),
+        )
+        .unwrap();
+
+        assert!(
+            app.update_rule(
+                &ForwardRuleId::new("web"),
+                ForwardRuleDraft::parse("edited", "", "", "", "4000").unwrap(),
+            )
+            .is_err()
+        );
+        assert_eq!(app.rules_for(&TargetId::new("dev")), [original]);
     }
 }

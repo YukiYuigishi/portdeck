@@ -606,11 +606,12 @@ mod tests {
     use std::cell::RefCell;
     use std::ffi::OsString;
     use std::io;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
     use std::path::Path;
 
     use super::{
         CommandExecutor, ExecutionMode, InputError, LocalForwardSpec, OpenSsh, SshCommand,
-        SshOutput, validate_host_alias,
+        SshOutput, private_unlinked_stderr_file, validate_host_alias,
     };
 
     #[derive(Debug, Default)]
@@ -662,6 +663,15 @@ mod tests {
                 "dev",
             ]
         );
+    }
+
+    #[test]
+    fn interactive_stderr_file_is_private_and_immediately_unlinked() {
+        let file = private_unlinked_stderr_file().unwrap();
+        let metadata = file.metadata().unwrap();
+
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+        assert_eq!(metadata.nlink(), 0);
     }
 
     #[test]

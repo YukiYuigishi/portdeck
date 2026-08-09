@@ -3,8 +3,9 @@
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, MutexGuard};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::{Mutex, MutexGuard, mpsc};
+use std::thread;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use portdeck::ssh::{LocalForwardSpec, OpenSsh};
 
@@ -19,6 +20,29 @@ struct FakeSsh {
 
 impl FakeSsh {
     fn new(exit_code: u8) -> Self {
+        Self::with_script(|_, arguments_log| {
+            format!(
+                "#!/bin/sh\n: > '{log}'\nfor argument in \"$@\"; do\n  printf '%s\\n' \"$argument\" >> '{log}'\ndone\nprintf 'fake stdout\\n'\nprintf 'fake stderr\\n' >&2\nexit {exit_code}\n",
+                log = arguments_log.display()
+            )
+        })
+    }
+
+    fn with_background_stderr_holder() -> (Self, PathBuf) {
+        let fake = Self::with_script(|directory, arguments_log| {
+            let sentinel = directory.join("hold-stderr-open");
+            format!(
+                "#!/bin/sh\n: > '{log}'\nfor argument in \"$@\"; do\n  printf '%s\\n' \"$argument\" >> '{log}'\ndone\n(\n  while [ -e '{sentinel}' ]; do\n    sleep 0.05\n  done\n) &\nprintf 'fake stderr before parent exit\\n' >&2\nexit 0\n",
+                log = arguments_log.display(),
+                sentinel = sentinel.display(),
+            )
+        });
+        let sentinel = fake.directory.join("hold-stderr-open");
+        fs::write(&sentinel, []).unwrap();
+        (fake, sentinel)
+    }
+
+    fn with_script(script: impl FnOnce(&Path, &Path) -> String) -> Self {
         let lock = FAKE_SSH_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -33,10 +57,7 @@ impl FakeSsh {
         let executable = directory.join("ssh");
         let temporary_executable = directory.join("ssh.tmp");
         let arguments_log = directory.join("arguments");
-        let script = format!(
-            "#!/bin/sh\n: > '{log}'\nfor argument in \"$@\"; do\n  printf '%s\\n' \"$argument\" >> '{log}'\ndone\nprintf 'fake stdout\\n'\nprintf 'fake stderr\\n' >&2\nexit {exit_code}\n",
-            log = arguments_log.display()
-        );
+        let script = script(&directory, &arguments_log);
         fs::write(&temporary_executable, script).unwrap();
         let mut permissions = fs::metadata(&temporary_executable).unwrap().permissions();
         permissions.set_mode(0o700);
@@ -138,6 +159,30 @@ fn successful_interactive_connect_uses_an_isolated_master() {
             "ClearAllForwardings=yes",
             "dev",
         ]
+    );
+}
+
+#[test]
+fn interactive_connect_does_not_wait_for_background_stderr_eof() {
+    let (fake, sentinel) = FakeSsh::with_background_stderr_holder();
+    let ssh = OpenSsh::new(&fake.executable);
+    let (release_sender, release_receiver) = mpsc::channel();
+    let fallback_release = thread::spawn(move || {
+        let _ = release_receiver.recv_timeout(Duration::from_secs(2));
+        let _ = fs::remove_file(sentinel);
+    });
+
+    let started = Instant::now();
+    let output = ssh.connect("dev", Path::new("control")).unwrap();
+    let elapsed = started.elapsed();
+    let _ = release_sender.send(());
+    fallback_release.join().unwrap();
+
+    assert!(output.success);
+    assert_eq!(output.stderr, "fake stderr before parent exit\n");
+    assert!(
+        elapsed < Duration::from_secs(1),
+        "interactive connect waited {elapsed:?} for inherited stderr to close"
     );
 }
 

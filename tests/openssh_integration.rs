@@ -11,7 +11,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use portdeck::domain::TargetId;
 use portdeck::runtime::RuntimeDirectory;
-use portdeck::ssh::{LocalForwardSpec, OpenSsh};
+use portdeck::ssh::{DynamicForwardSpec, LocalForwardSpec, OpenSsh};
 
 struct SshdFixture {
     directory: PathBuf,
@@ -181,6 +181,99 @@ fn exchange(port: u16, request: &[u8], expected_response: &[u8]) {
     assert_eq!(response, expected_response);
 }
 
+fn exchange_via_socks5(
+    socks_port: u16,
+    destination_port: u16,
+    request: &[u8],
+    expected_response: &[u8],
+) {
+    let mut connection = TcpStream::connect(("127.0.0.1", socks_port)).unwrap();
+    connection
+        .set_read_timeout(Some(Duration::from_secs(3)))
+        .unwrap();
+    connection.write_all(&[5, 1, 0]).unwrap();
+    let mut method = [0_u8; 2];
+    connection.read_exact(&mut method).unwrap();
+    assert_eq!(method, [5, 0], "OpenSSH did not accept SOCKS5 no-auth");
+
+    let [port_high, port_low] = destination_port.to_be_bytes();
+    connection
+        .write_all(&[5, 1, 0, 1, 127, 0, 0, 1, port_high, port_low])
+        .unwrap();
+    let mut reply_header = [0_u8; 4];
+    connection.read_exact(&mut reply_header).unwrap();
+    assert_eq!(reply_header[0], 5);
+    assert_eq!(
+        reply_header[1], 0,
+        "SOCKS5 connect failed: {reply_header:?}"
+    );
+    let address_length = match reply_header[3] {
+        1 => 4,
+        4 => 16,
+        3 => {
+            let mut length = [0_u8; 1];
+            connection.read_exact(&mut length).unwrap();
+            usize::from(length[0])
+        }
+        kind => panic!("unexpected SOCKS5 address type {kind}"),
+    };
+    let mut bound_address_and_port = vec![0_u8; address_length + 2];
+    connection.read_exact(&mut bound_address_and_port).unwrap();
+
+    connection.write_all(request).unwrap();
+    let mut response = vec![0_u8; expected_response.len()];
+    connection.read_exact(&mut response).unwrap();
+    assert_eq!(response, expected_response);
+}
+
+fn assert_listener_closes(port: u16) {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < deadline {
+        if TcpStream::connect(("127.0.0.1", port)).is_err() {
+            return;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    panic!("listener 127.0.0.1:{port} remained open after cancel");
+}
+
+fn dynamic_forward_traffic_cancel_and_exit(host_alias: &str) {
+    let fixture = SshdFixture::start();
+    let ssh = OpenSsh::new(&fixture.client_executable);
+    let runtime = RuntimeDirectory::prepare(fixture.directory.join("runtime")).unwrap();
+    let control_path = runtime.control_path(&TargetId::new(host_alias)).unwrap();
+    let destination_listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let destination_port = destination_listener.local_addr().unwrap().port();
+    let echo_server = echo_once(destination_listener, b"proxy request", b"proxy response");
+    let reservation = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let socks_port = reservation.local_addr().unwrap().port();
+    drop(reservation);
+    let forward = DynamicForwardSpec::new("127.0.0.1", socks_port).unwrap();
+
+    let connect = ssh.connect(host_alias, &control_path).unwrap();
+    assert!(connect.success, "{}", connect.stderr);
+    let add = ssh
+        .add_dynamic_forward(host_alias, &control_path, &forward)
+        .unwrap();
+    assert!(add.success, "{}", add.stderr);
+    exchange_via_socks5(
+        socks_port,
+        destination_port,
+        b"proxy request",
+        b"proxy response",
+    );
+    echo_server.join().unwrap();
+
+    let cancel = ssh
+        .cancel_dynamic_forward(host_alias, &control_path, &forward)
+        .unwrap();
+    assert!(cancel.success, "{}", cancel.stderr);
+    assert_listener_closes(socks_port);
+    let disconnect = ssh.disconnect(host_alias, &control_path).unwrap();
+    assert!(disconnect.success, "{}", disconnect.stderr);
+    assert!(!control_path.exists());
+}
+
 #[test]
 #[ignore = "requires local /usr/sbin/sshd and isolated key generation"]
 fn controlmaster_forward_traffic_cancel_and_exit() {
@@ -284,4 +377,16 @@ fn proxyjump_controlmaster_returns_checks_and_exits() {
             .unwrap()
             .success
     );
+}
+
+#[test]
+#[ignore = "requires local /usr/sbin/sshd and isolated key generation"]
+fn direct_controlmaster_dynamic_forward_socks5_traffic_and_cancel() {
+    dynamic_forward_traffic_cancel_and_exit("integration-target");
+}
+
+#[test]
+#[ignore = "requires local /usr/sbin/sshd and isolated key generation"]
+fn proxyjump_controlmaster_dynamic_forward_socks5_traffic_and_cancel() {
+    dynamic_forward_traffic_cancel_and_exit("integration-target-via-jump");
 }

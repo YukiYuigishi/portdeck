@@ -190,7 +190,7 @@ fn run_tui(version: &str, debug_path: Option<&Path>) -> Result<()> {
     let startup_notice = if diagnostic_count > 0 || !recovery.unknown_paths.is_empty() {
         Some(StartupNotice {
             status: format!(
-                "起動診断に{}件の注意があります（e: 詳細）",
+                "起動診断に{}件の注意があります（E: 詳細）",
                 diagnostic_count + recovery.unknown_paths.len()
             ),
             error_detail: Some(startup_details.join("\n")),

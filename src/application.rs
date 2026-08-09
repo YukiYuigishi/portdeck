@@ -227,6 +227,15 @@ impl<B: SshClient, P: PortProbe> AppState<B, P> {
             remote_port: draft.remote_port,
         };
         if let Err(error) = self.persist_rules() {
+            tracing::debug!(
+                component = "persistence",
+                operation = "rollback_update_rule",
+                operation_id = crate::logging::next_operation_id(),
+                target_id = target_id.as_str(),
+                rule_id = current.id.as_str(),
+                error_kind = "store",
+                "restoring forward rule after persistence failure"
+            );
             self.rules
                 .get_mut(&target_id)
                 .expect("the selected rule's target exists")[index] = current;

@@ -686,6 +686,9 @@ fn log_ui_command(command: &UiCommand) {
         UiCommand::AddForward(target_id, _) => {
             log_target_command("add_forward_rule", operation_id, target_id);
         }
+        UiCommand::UpdateForward(rule_id, _) => {
+            log_rule_command("update_forward_rule", operation_id, rule_id);
+        }
         UiCommand::ActivateForward(rule_id) => {
             log_rule_command("activate_forward", operation_id, rule_id);
         }

@@ -83,7 +83,7 @@ impl SshdFixture {
         fs::write(
             &client_config,
             format!(
-                "Host integration-target\n  HostName 127.0.0.1\n  Port {ssh_port}\n  User {username}\n  IdentityFile {}\n  IdentitiesOnly yes\n  UserKnownHostsFile {}\n  StrictHostKeyChecking yes\n  BatchMode yes\n  LogLevel DEBUG3\n",
+                "Host integration-target integration-jump integration-target-via-jump\n  HostName 127.0.0.1\n  Port {ssh_port}\n  User {username}\n  IdentityFile {}\n  IdentitiesOnly yes\n  UserKnownHostsFile {}\n  StrictHostKeyChecking yes\n  BatchMode yes\n  LogLevel DEBUG3\n\nHost integration-target-via-jump\n  ProxyJump integration-jump\n",
                 client_key.display(),
                 known_hosts.display(),
             ),
@@ -245,6 +245,42 @@ fn controlmaster_forward_traffic_cancel_and_exit() {
     assert!(disconnect.success, "{}", disconnect.stderr);
     assert!(
         !ssh.check("integration-target", &control_path)
+            .unwrap()
+            .success
+    );
+}
+
+#[test]
+#[ignore = "requires local /usr/sbin/sshd and isolated key generation"]
+fn proxyjump_controlmaster_returns_checks_and_exits() {
+    let fixture = SshdFixture::start();
+    let ssh = OpenSsh::new(&fixture.client_executable);
+    let runtime = RuntimeDirectory::prepare(fixture.directory.join("runtime")).unwrap();
+    let control_path = runtime
+        .control_path(&TargetId::new("integration-target-via-jump"))
+        .unwrap();
+
+    let started = Instant::now();
+    let connect = ssh
+        .connect("integration-target-via-jump", &control_path)
+        .unwrap();
+    let connect_elapsed = started.elapsed();
+    let check = ssh
+        .check("integration-target-via-jump", &control_path)
+        .unwrap();
+    let disconnect = ssh
+        .disconnect("integration-target-via-jump", &control_path)
+        .unwrap();
+
+    assert!(connect.success, "{}", connect.stderr);
+    assert!(
+        connect_elapsed < Duration::from_secs(3),
+        "ProxyJump connect waited {connect_elapsed:?} for inherited stderr to close"
+    );
+    assert!(check.success, "{}", check.stderr);
+    assert!(disconnect.success, "{}", disconnect.stderr);
+    assert!(
+        !ssh.check("integration-target-via-jump", &control_path)
             .unwrap()
             .success
     );

@@ -1,6 +1,6 @@
 # TUI does not resume after a successful SSH connection
 
-- Status: Open
+- Status: Confirmed
 - Priority: High
 - Reported: 2026-08-09
 - Component: `tui`, `ssh`
@@ -75,6 +75,18 @@ stderr(Stdio::piped()).output()
 
 したがって、確認済みの待機機構は実在するが、通常構成の全OpenSSH接続で発生するわけではない。報告環境でbackground側にdescriptorが残る条件、またはresume済みだが旧描画のため復帰していないように見えた可能性を追加で切り分ける。
 
+### Isolated real ProxyJump
+
+同じ隔離sshdをjump hostとdestinationの両方として設定し、実際の`ProxyJump`と本番`SystemCommandExecutor`を使って検証した。
+
+- ProxyJump経由のControlMasterは3秒以内にreadyになった。
+- ProxyJumpが起動した`ssh -W`プロセスがstderr pipeを保持した。
+- 接続用の親プロセス終了後も`Command::output()`がEOFを待ち、TUIへ戻らなかった。
+- deadline後に別プロセスから`-O exit`を実行すると正常にmasterを終了でき、待機も解除された。
+- テスト用sshd、ProxyJumpプロセス、ControlPathの残存がないことを確認した。
+
+これにより、報告された症状と同じ停止をOpenSSH 9.6p1の実ProxyJumpで再現した。現状のportdeckはProxyJumpの設定解決と接続開始まではOpenSSHへ正しく委譲するが、接続後にTUIへ復帰できないため、ProxyJump接続を正常利用できる状態ではない。
+
 ## Proposed direction
 
 - interactive接続ではpipeのEOFではなく、接続用OpenSSHプロセスの終了ステータスを待つ。
@@ -90,6 +102,7 @@ stderr(Stdio::piped()).output()
 - [ ] 成功後に保存済みルールを`Space`で有効化できる。
 - [ ] 失敗時のOpenSSH stderrを`e`で確認できる。
 - [ ] background processがstderr descriptorを保持するケースの回帰テストがある。
+- [ ] 実ProxyJump経由の接続後にTUIへ自動復帰する。
 - [ ] TUI復帰後に画面全体が正しくredrawされる。
 - [ ] 終了後に一時診断ファイルや不要なControlMasterが残らない。
 

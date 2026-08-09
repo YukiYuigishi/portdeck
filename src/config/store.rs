@@ -478,6 +478,29 @@ mod tests {
     }
 
     #[test]
+    fn edited_rule_replaces_persisted_fields_without_changing_identity() {
+        let directory = TestDirectory::new();
+        let path = directory.path().join("config.toml");
+        let targets = [target("dev")];
+        let mut store = RuleStore::at(&path);
+        let original = rule();
+        store.save(&targets, &[&original]).unwrap();
+        let mut edited = original.clone();
+        edited.label = Some("edited database".to_owned());
+        edited.bind_address = "::1".to_owned();
+        edited.requested_local_port = Some(15432);
+        edited.remote_host = "db.internal.example".to_owned();
+        edited.remote_port = 6432;
+
+        store.save(&targets, &[&edited]).unwrap();
+        let loaded = store.load(&targets).unwrap();
+
+        assert_eq!(loaded, [edited]);
+        assert_eq!(loaded[0].id, original.id);
+        assert_eq!(loaded[0].target_id, original.target_id);
+    }
+
+    #[test]
     fn preserves_rules_for_temporarily_unknown_targets() {
         let directory = TestDirectory::new();
         let path = directory.path().join("config.toml");

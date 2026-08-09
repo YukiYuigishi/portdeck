@@ -1579,6 +1579,35 @@ mod tests {
     }
 
     #[test]
+    fn pane_navigation_and_render_are_safe_with_empty_lists() {
+        let fixture = Fixture::with_aliases(&[]);
+        let mut ui = UiState::default();
+
+        for code in [
+            KeyCode::Char('l'),
+            KeyCode::Char('j'),
+            KeyCode::Char('k'),
+            KeyCode::Char('h'),
+            KeyCode::Char('j'),
+            KeyCode::Char('k'),
+        ] {
+            handle_key(
+                &mut ui,
+                &fixture.app,
+                KeyEvent::new(code, KeyModifiers::NONE),
+            );
+        }
+        assert_eq!(ui.focus, Focus::Targets);
+        assert_eq!(ui.selected_target, 0);
+        assert_eq!(ui.selected_forward, 0);
+
+        let mut terminal = Terminal::new(TestBackend::new(60, 8)).unwrap();
+        terminal
+            .draw(|frame| render(frame, &ui, &fixture.app))
+            .unwrap();
+    }
+
+    #[test]
     fn vim_pane_keys_remain_text_in_forward_form() {
         let fixture = Fixture::new();
         let mut ui = UiState {

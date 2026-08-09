@@ -1,8 +1,9 @@
 # TUI does not resume after a successful SSH connection
 
-- Status: Confirmed
+- Status: Resolved
 - Priority: High
 - Reported: 2026-08-09
+- Resolved: 2026-08-09
 - Component: `tui`, `ssh`
 
 ## Summary
@@ -101,24 +102,40 @@ stderr(Stdio::piped()).output()
 
 `ksl-pc`での症状は接続・認証の失敗ではなく、成功済みのProxyJump接続がstderr descriptorを保持することで発生するTUI復帰待ちである。復帰のために`Ctrl-C`を押す必要はなく、押した場合は正常な接続を中断してしまう。
 
-## Proposed direction
+## Resolution
 
-- interactive接続ではpipeのEOFではなく、接続用OpenSSHプロセスの終了ステータスを待つ。
-- stderrを保持する場合は、所有者限定の一時regular fileなど、background masterがdescriptorを継承しても呼び出し元の完了を妨げない方法を検討する。
-- 一時診断データを使う場合はmode `0600`、確実な削除、ログへの秘密情報混入防止を確認する。
+- interactive接続ではstderr pipeのEOFではなく、接続用OpenSSHプロセスの終了ステータスを待つようにした。
+- stderrはmode `0600`の一時regular fileへ記録する。ファイルは作成直後にunlinkし、background masterやProxyJumpがdescriptorを継承しても呼び出し元の完了を妨げず、ファイル名も残らない。
+- 接続用プロセス終了時点のstderrをoffset指定で読み、従来どおり失敗診断として保持する。
 - 接続後の`ssh -O check`とTUI全面redrawは従来どおり実行する。
+
+実装と回帰テストは次のコミットへ分離した。
+
+- `65f61b0 fix(ssh): avoid waiting for inherited stderr pipes`
+- `d9b401c test(ssh): cover inherited stderr descriptors`
+- `6b2a1de test(ssh): cover real ProxyJump control master`
+- `4e45a6a test(ssh): verify private stderr capture file`
+
+## Fix verification
+
+- backgroundプロセスがstderr descriptorを保持し続けるfake SSHで、親プロセス終了後1秒未満に復帰し、親が出力したstderrも取得できることを確認した。
+- 隔離sshdの実OpenSSH 9.6p1で、direct接続とProxyJump接続の`connect`、`-O check`、`-O exit`が成功した。
+- 実接続先`ksl-pc`（`HostName 192.168.0.83`、`ProxyJump ksl-ns`）をTUIで選んで`c`を押すと、選択画面へ自動復帰して`Connected`を表示した。
+- TUI復帰後、別プロセスの`ssh -O check ksl-pc`でも専用ControlMasterの稼働を確認した。
+- TUIの`q`、`y`で正常終了後、専用ControlMaster、ProxyJumpプロセス、ControlPathが残らないことを確認した。
+- ユーザーのSSH設定、known_hosts、秘密鍵は変更していない。
 
 ## Acceptance criteria
 
-- [ ] 実OpenSSHで接続成功後にTUIへ自動復帰する。
-- [ ] 認証失敗・接続失敗後にもTUIへ自動復帰する。
-- [ ] パスフレーズ、初回ホスト鍵確認、keyboard-interactiveで端末入力できる。
-- [ ] 成功後に保存済みルールを`Space`で有効化できる。
-- [ ] 失敗時のOpenSSH stderrを`e`で確認できる。
-- [ ] background processがstderr descriptorを保持するケースの回帰テストがある。
-- [ ] 実ProxyJump経由の接続後にTUIへ自動復帰する。
-- [ ] TUI復帰後に画面全体が正しくredrawされる。
-- [ ] 終了後に一時診断ファイルや不要なControlMasterが残らない。
+- [x] 実OpenSSHで接続成功後にTUIへ自動復帰する。
+- [x] 認証失敗・接続失敗後にもTUIへ自動復帰する。
+- [x] パスフレーズ、初回ホスト鍵確認、keyboard-interactiveで端末入力できる。
+- [x] 成功後に保存済みルールを`Space`で有効化できる。
+- [x] 失敗時のOpenSSH stderrを`e`で確認できる。
+- [x] background processがstderr descriptorを保持するケースの回帰テストがある。
+- [x] 実ProxyJump経由の接続後にTUIへ自動復帰する。
+- [x] TUI復帰後に画面全体が正しくredrawされる。
+- [x] 終了後に一時診断ファイルや不要なControlMasterが残らない。
 
 ## Related work
 

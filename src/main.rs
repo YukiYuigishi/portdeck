@@ -88,14 +88,23 @@ fn run_tui(version: &str, debug_path: Option<&Path>) -> Result<()> {
     tracing::info!(
         component = "application",
         operation = "startup",
+        operation_id = portdeck::logging::next_operation_id(),
         version,
         "portdeck starting"
     );
 
+    let discovery_operation_id = portdeck::logging::next_operation_id();
+    tracing::debug!(
+        component = "config",
+        operation = "target_discovery",
+        operation_id = discovery_operation_id,
+        "SSH target discovery started"
+    );
     let targets = TargetDiscovery::from_environment()?.discover()?;
     tracing::debug!(
         component = "config",
         operation = "target_discovery",
+        operation_id = discovery_operation_id,
         targets = targets.len(),
         "SSH target discovery completed"
     );
@@ -110,7 +119,24 @@ fn run_tui(version: &str, debug_path: Option<&Path>) -> Result<()> {
         openssh_version,
         "OpenSSH capability probe succeeded"
     );
+    let resolution_operation_id = portdeck::logging::next_operation_id();
+    tracing::debug!(
+        component = "config",
+        operation = "effective_config_resolution",
+        operation_id = resolution_operation_id,
+        targets = sessions.entries().len(),
+        "effective SSH configuration resolution started"
+    );
     let config_failures = sessions.resolve_target_configs();
+    tracing::debug!(
+        component = "config",
+        operation = "effective_config_resolution",
+        operation_id = resolution_operation_id,
+        targets = sessions.entries().len(),
+        failures = config_failures.len(),
+        success = config_failures.is_empty(),
+        "effective SSH configuration resolution completed"
+    );
     if !config_failures.is_empty() {
         tracing::warn!(
             failures = config_failures.len(),
@@ -118,8 +144,18 @@ fn run_tui(version: &str, debug_path: Option<&Path>) -> Result<()> {
         );
     }
 
+    let recovery_operation_id = portdeck::logging::next_operation_id();
+    tracing::debug!(
+        component = "runtime",
+        operation = "recovery",
+        operation_id = recovery_operation_id,
+        "runtime recovery started"
+    );
     let recovery = sessions.recover_previous_runtime()?;
     tracing::info!(
+        component = "runtime",
+        operation = "recovery",
+        operation_id = recovery_operation_id,
         terminated = recovery.terminated_targets.len(),
         stale_removed = recovery.removed_stale_paths.len(),
         unknown = recovery.unknown_paths.len(),
@@ -179,15 +215,18 @@ fn run_tui(version: &str, debug_path: Option<&Path>) -> Result<()> {
 
     let mut app = AppState::with_store(sessions, saved_rules, rule_store)?;
     let tui_result = portdeck::tui::run(&mut app, startup_notice);
+    let shutdown_operation_id = portdeck::logging::next_operation_id();
     tracing::debug!(
         component = "application",
         operation = "shutdown",
+        operation_id = shutdown_operation_id,
         "owned session shutdown started"
     );
     let shutdown_errors = app.sessions_mut().shutdown_all();
     tracing::debug!(
         component = "application",
         operation = "shutdown",
+        operation_id = shutdown_operation_id,
         failures = shutdown_errors.len(),
         success = shutdown_errors.is_empty(),
         "owned session shutdown completed"

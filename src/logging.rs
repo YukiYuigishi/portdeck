@@ -5,6 +5,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -16,6 +17,12 @@ const LOG_DIRECTORY: &str = "portdeck";
 const RETAINED_DEBUG_LOGS: usize = 10;
 const MAX_REMOVALS_PER_START: usize = 64;
 const CREATE_ATTEMPTS: usize = 32;
+static NEXT_OPERATION_ID: AtomicU64 = AtomicU64::new(1);
+
+/// Allocates a process-local ID used to correlate one operation's events.
+pub fn next_operation_id() -> u64 {
+    NEXT_OPERATION_ID.fetch_add(1, Ordering::Relaxed)
+}
 
 /// Installed logging mode and the optional DEBUG log path.
 #[derive(Debug, Clone)]

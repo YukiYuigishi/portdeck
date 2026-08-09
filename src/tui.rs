@@ -522,6 +522,7 @@ fn execute_ui_command<B: SshClient, P: PortProbe>(
     app: &mut AppState<B, P>,
     terminal: &mut TerminalGuard,
 ) -> Result<(), TuiError> {
+    log_ui_command(&command);
     match command {
         UiCommand::None => {}
         UiCommand::Connect(target_id) => {
@@ -573,6 +574,56 @@ fn execute_ui_command<B: SshClient, P: PortProbe>(
         UiCommand::Quit => ui.should_quit = true,
     }
     Ok(())
+}
+
+fn log_ui_command(command: &UiCommand) {
+    let operation_id = crate::logging::next_operation_id();
+    match command {
+        UiCommand::None => {}
+        UiCommand::Connect(target_id) => log_target_command("connect", operation_id, target_id),
+        UiCommand::Disconnect(target_id) => {
+            log_target_command("disconnect", operation_id, target_id);
+        }
+        UiCommand::Check(target_id) => log_target_command("check", operation_id, target_id),
+        UiCommand::AddForward(target_id, _) => {
+            log_target_command("add_forward_rule", operation_id, target_id);
+        }
+        UiCommand::ActivateForward(rule_id) => {
+            log_rule_command("activate_forward", operation_id, rule_id);
+        }
+        UiCommand::CancelForward(rule_id) => {
+            log_rule_command("cancel_forward", operation_id, rule_id);
+        }
+        UiCommand::DeleteForward(rule_id) => {
+            log_rule_command("delete_forward_rule", operation_id, rule_id);
+        }
+        UiCommand::Quit => tracing::debug!(
+            component = "tui",
+            operation = "quit",
+            operation_id,
+            "TUI command requested"
+        ),
+    }
+}
+
+fn log_target_command(operation: &'static str, operation_id: u64, target_id: &TargetId) {
+    tracing::debug!(
+        component = "tui",
+        operation,
+        operation_id,
+        target_id = target_id.as_str(),
+        "TUI command requested"
+    );
+}
+
+fn log_rule_command(operation: &'static str, operation_id: u64, rule_id: &ForwardRuleId) {
+    tracing::debug!(
+        component = "tui",
+        operation,
+        operation_id,
+        rule_id = rule_id.as_str(),
+        "TUI command requested"
+    );
 }
 
 fn move_selection<B: SshClient, P: PortProbe>(

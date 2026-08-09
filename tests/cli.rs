@@ -23,7 +23,9 @@ fn help_documents_the_supported_cli_modes() {
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.contains("SSH connection and local-forward manager"));
-    assert!(stdout.contains("portdeck [--diagnose | --version | --help]"));
+    assert!(stdout.contains("portdeck [--debug] [--diagnose]"));
+    assert!(stdout.contains("XDG State directory"));
+    assert!(stdout.contains("raw OpenSSH output are omitted"));
     assert!(output.stderr.is_empty());
 }
 

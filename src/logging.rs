@@ -24,6 +24,17 @@ pub fn next_operation_id() -> u64 {
     NEXT_OPERATION_ID.fetch_add(1, Ordering::Relaxed)
 }
 
+/// Extracts the bounded public version token from `ssh -V` diagnostics.
+pub fn openssh_version_token(diagnostic: &str) -> Option<&str> {
+    let token = diagnostic.split_whitespace().next()?;
+    (token.starts_with("OpenSSH_")
+        && token.len() <= 64
+        && token
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b'-')))
+    .then_some(token)
+}
+
 /// Installed logging mode and the optional DEBUG log path.
 #[derive(Debug, Clone)]
 pub struct LoggingHandle {
@@ -364,7 +375,7 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use super::{create_debug_log, is_owned_debug_filename};
+    use super::{create_debug_log, is_owned_debug_filename, openssh_version_token};
 
     struct TestDirectory(PathBuf);
 
@@ -413,6 +424,19 @@ mod tests {
         assert!(!is_owned_debug_filename("debug-latest.log"));
         assert!(!is_owned_debug_filename("debug-123-456.log.backup"));
         assert!(!is_owned_debug_filename("debug-123-secret-456.log"));
+    }
+
+    #[test]
+    fn openssh_version_logging_accepts_only_a_bounded_public_token() {
+        assert_eq!(
+            openssh_version_token("OpenSSH_9.6p1 Ubuntu, OpenSSL 3.0"),
+            Some("OpenSSH_9.6p1")
+        );
+        assert_eq!(openssh_version_token("password=do-not-log"), None);
+        assert_eq!(
+            openssh_version_token("OpenSSH_9.6p1\nsecret"),
+            Some("OpenSSH_9.6p1")
+        );
     }
 
     fn mode(path: &Path) -> u32 {

@@ -113,6 +113,8 @@ fn run_tui(version: &str, debug_path: Option<&Path>) -> Result<()> {
     let runtime = RuntimeDirectory::from_environment()?;
     let mut sessions = SessionManager::new(OpenSsh::default(), runtime, targets)?;
     let openssh_version = sessions.probe_openssh()?;
+    let openssh_version =
+        portdeck::logging::openssh_version_token(&openssh_version).unwrap_or("unrecognized");
     tracing::info!(
         component = "ssh",
         operation = "version",

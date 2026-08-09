@@ -1,8 +1,9 @@
 #![cfg(unix)]
 
 use std::fs;
-use std::io::{self, Read, Write};
+use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::thread;
@@ -10,34 +11,11 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use portdeck::domain::TargetId;
 use portdeck::runtime::RuntimeDirectory;
-use portdeck::ssh::{
-    CommandExecutor, ExecutionMode, LocalForwardSpec, OpenSsh, SshCommand, SshOutput,
-};
-
-#[derive(Debug)]
-struct ConfiguredSshExecutor {
-    client_config: PathBuf,
-}
-
-impl CommandExecutor for ConfiguredSshExecutor {
-    fn execute(&self, command: &SshCommand, _mode: ExecutionMode) -> io::Result<SshOutput> {
-        let output = Command::new("/usr/bin/ssh")
-            .arg("-F")
-            .arg(&self.client_config)
-            .args(command.arguments())
-            .output()?;
-        Ok(SshOutput {
-            success: output.status.success(),
-            exit_code: output.status.code(),
-            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-        })
-    }
-}
+use portdeck::ssh::{LocalForwardSpec, OpenSsh};
 
 struct SshdFixture {
     directory: PathBuf,
-    client_config: PathBuf,
+    client_executable: PathBuf,
     child: Child,
 }
 
@@ -105,16 +83,29 @@ impl SshdFixture {
         fs::write(
             &client_config,
             format!(
-                "Host integration-target\n  HostName 127.0.0.1\n  Port {ssh_port}\n  User {username}\n  IdentityFile {}\n  IdentitiesOnly yes\n  UserKnownHostsFile {}\n  StrictHostKeyChecking yes\n  BatchMode yes\n  LogLevel ERROR\n",
+                "Host integration-target\n  HostName 127.0.0.1\n  Port {ssh_port}\n  User {username}\n  IdentityFile {}\n  IdentitiesOnly yes\n  UserKnownHostsFile {}\n  StrictHostKeyChecking yes\n  BatchMode yes\n  LogLevel DEBUG3\n",
                 client_key.display(),
                 known_hosts.display(),
             ),
         )
         .unwrap();
 
+        let client_executable = directory.join("ssh");
+        fs::write(
+            &client_executable,
+            format!(
+                "#!/bin/sh\nexec /usr/bin/ssh -F '{}' \"$@\"\n",
+                client_config.display()
+            ),
+        )
+        .unwrap();
+        let mut permissions = fs::metadata(&client_executable).unwrap().permissions();
+        permissions.set_mode(0o700);
+        fs::set_permissions(&client_executable, permissions).unwrap();
+
         let mut fixture = Self {
             directory,
-            client_config,
+            client_executable,
             child,
         };
         fixture.wait_until_ready(ssh_port);
@@ -194,10 +185,7 @@ fn exchange(port: u16, request: &[u8], expected_response: &[u8]) {
 #[ignore = "requires local /usr/sbin/sshd and isolated key generation"]
 fn controlmaster_forward_traffic_cancel_and_exit() {
     let fixture = SshdFixture::start();
-    let executor = ConfiguredSshExecutor {
-        client_config: fixture.client_config.clone(),
-    };
-    let ssh = OpenSsh::with_executor("/usr/bin/ssh", executor);
+    let ssh = OpenSsh::new(&fixture.client_executable);
     let runtime = RuntimeDirectory::prepare(fixture.directory.join("runtime")).unwrap();
     let control_path = runtime
         .control_path(&TargetId::new("integration-target"))

@@ -46,16 +46,22 @@ DEBUG eventは接続、状態確認、切断、転送の追加・取消、port�
 
 | Key | Action |
 | --- | --- |
-| `Tab` / `←` / `→` | TargetsとForwardsのペインを切り替える |
+| `Tab` | TargetsとForwardsのペインを切り替える |
+| `h` / `←` | Targetsペインへ移動する |
+| `l` / `→` | Forwardsペインへ移動する |
 | `↑` / `↓` / `j` / `k` | 選択を移動する |
+| `/` | Hostエイリアスの部分一致検索を開始する |
 | `c` | 選択した接続先へ接続する |
 | `r` | `ssh -O check`で接続状態を再確認する |
 | `a` | 保存済み転送ルールを追加する |
+| `e` | 選択したInactiveな転送ルールを編集する |
 | `Space` | 選択した転送を有効化、または取消する |
 | `D` | 転送ルールを確認後に削除する |
 | `d` | SSHセッションを確認後に終了する |
-| `e` | 直近のOpenSSH stderrまたは起動診断を表示する |
+| `E` | 直近のOpenSSH stderrまたは起動診断を表示する |
 | `q` / `Ctrl-C` | portdeck所有セッションを終了してquitする |
+
+検索は大文字と小文字を区別しません。入力中は`Backspace`で末尾を削除し、`Enter`で絞り込みを確定、`Esc`で編集前の絞り込みへ戻ります。空の検索を確定すると全接続先を再表示します。検索対象は`Host`エイリアスのみで、SSH設定やportdeckの保存設定は変更しません。
 
 接続時にはTUIを一時停止し、認証、鍵のパスフレーズ、初回ホスト鍵確認に端末を直接使える状態でOpenSSHを起動します。OpenSSHが終了した後にTUIへ戻ります。
 
@@ -72,6 +78,12 @@ DEBUG eventは接続、状態確認、切断、転送の追加・取消、port�
 保存しただけでは転送は有効になりません。Forwardsペインでルールを選択し、`Space`を押してください。希望ポートが競合する場合は最大20個の連続した候補を試し、OpenSSHが実際に追加できたローカルポートを表示します。
 
 `0.0.0.0`、`::`、`*`へのbindはローカルネットワークなどへ公開される可能性があるため、保存前に追加確認を表示します。
+
+### Edit a forward
+
+ForwardsペインでInactiveな保存済みルールを選択して`e`を押すと、追加時と同じフォームへ現在値を読み込んで編集できます。`Enter`で保存し、`Esc`で変更を破棄します。編集してもルールID、所属する接続先、一覧上の選択位置は変わらず、転送は自動的には有効化されません。
+
+Active、Adding、Removing、Unavailable、Failedのルールや実際のローカルポート情報が残っているルールは編集できません。先に`Space`で転送を取消してInactiveへ戻してください。外部公開bindへ変更する場合は、追加時と同じ確認を表示します。
 
 ## Runtime and persistence
 
@@ -121,7 +133,7 @@ ControlPathは`$XDG_RUNTIME_DIR/portdeck/`に置きます。`XDG_RUNTIME_DIR`が
 
 - 接続先がない: `~/.ssh/config`にワイルドカードではない`Host <alias>`があるか、`Include`先を読めるか確認してください。
 - OpenSSHを起動できない: `portdeck --diagnose`と`ssh -V`を確認してください。
-- 接続・認証に失敗する: `e`でOpenSSH stderrを表示し、同じaliasに`ssh <alias>`で接続できるか確認してください。portdeckは認証方式やホスト鍵設定を緩和して再試行しません。
+- 接続・認証に失敗する: `E`でOpenSSH stderrを表示し、同じaliasに`ssh <alias>`で接続できるか確認してください。portdeckは認証方式やホスト鍵設定を緩和して再試行しません。
 - 転送を追加できない: ローカルポート競合、サーバーの`AllowTcpForwarding`、リモート宛先を確認してください。
 - 状態が古い: `r`でControlMasterを再確認してください。切断を検出すると配下の転送も`Unavailable`になります。
 - 詳細な操作経路が必要: `portdeck --debug`で再現し、起動時またはTUIに表示された所有者限定ログを確認してください。共有前に運用上のhost名やport番号も確認してください。

@@ -1,9 +1,10 @@
 # Edit saved forward rules
 
-- Status: Proposed
+- Status: Resolved
 - Priority: Medium
 - Reported: 2026-08-09
 - Component: `application`, `config`, `tui`
+- Resolved: 2026-08-09
 
 ## Summary
 
@@ -63,13 +64,26 @@ OpenSSHの`-O cancel`と`-O forward`を組み合わせても、旧転送取消�
 
 ## Acceptance criteria
 
-- [ ] 保存済みのInactiveな転送ルールをTUIから編集できる。
-- [ ] `e`で編集し、`E`で従来のエラー詳細を表示できる。
-- [ ] 編集フォームへ現在値が正しく読み込まれる。
-- [ ] rule ID、所属する接続先、選択位置が維持される。
-- [ ] Activeまたは実行データが残るルールは編集を拒否され、取消方法が表示される。
-- [ ] 外部公開bindには追加時と同じ警告が表示される。
-- [ ] 永続化失敗時に旧定義が維持される。
-- [ ] 編集後の有効化で新しいOpenSSH転送指定が使われる。
-- [ ] application、設定round-trip、TUIイベントと描画の回帰テストがある。
-- [ ] READMEとTUIのkey helpが新しいキー割当を説明している。
+- [x] 保存済みのInactiveな転送ルールをTUIから編集できる。
+- [x] `e`で編集し、`E`で従来のエラー詳細を表示できる。
+- [x] 編集フォームへ現在値が正しく読み込まれる。
+- [x] rule ID、所属する接続先、選択位置が維持される。
+- [x] Activeまたは実行データが残るルールは編集を拒否され、取消方法が表示される。
+- [x] 外部公開bindには追加時と同じ警告が表示される。
+- [x] 永続化失敗時に旧定義が維持される。
+- [x] 編集後の有効化で新しいOpenSSH転送指定が使われる。
+- [x] application、設定round-trip、TUIイベントと描画の回帰テストがある。
+- [x] READMEとTUIのkey helpが新しいキー割当を説明している。
+
+## Resolution
+
+- `AppState::update_rule`が完全にInactiveなルールだけを更新し、ID、target ID、一覧順を維持する。
+- atomic saveが失敗した場合は、同じ位置へ旧定義を復元する。
+- 追加・編集は同じフォームと入力検証を使い、public bind確認の取消後も編集内容を保持する。
+- `e`はForwardsペインの選択ルールを編集し、`E`は従来のエラー詳細を開く。
+- 編集後の`Space`による有効化では、更新後の正規化済み`-L`指定をOpenSSHへ渡す。
+
+## Verification
+
+- `./scripts/lint.sh`: passed
+- `cargo test --all-targets --all-features`: 73 unit tests、3 CLI tests、6 adapter tests passed（明示実行型の実sshd integration tests 2件はignored）

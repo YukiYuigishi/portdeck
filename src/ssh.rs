@@ -9,6 +9,7 @@ use std::os::unix::fs::{FileExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use thiserror::Error;
@@ -321,19 +322,23 @@ impl<E: CommandExecutor> OpenSsh<E> {
 
     /// Runs `ssh -V` to detect the executable and version text.
     pub fn version(&self) -> Result<SshOutput, SshError> {
-        self.capture(vec![OsString::from("-V")])
+        self.capture("version", vec![OsString::from("-V")])
     }
 
     /// Runs `ssh -G <alias>` so OpenSSH resolves effective configuration.
     pub fn resolve_config(&self, host_alias: &str) -> Result<SshOutput, SshError> {
         validate_host_alias(host_alias)?;
-        self.capture(vec![OsString::from("-G"), OsString::from(host_alias)])
+        self.capture(
+            "resolve_config",
+            vec![OsString::from("-G"), OsString::from(host_alias)],
+        )
     }
 
     /// Starts a dedicated ControlMaster while inheriting the current terminal.
     pub fn connect(&self, host_alias: &str, control_path: &Path) -> Result<SshOutput, SshError> {
         validate_host_alias(host_alias)?;
         self.execute(
+            "connect",
             vec![
                 OsString::from("-M"),
                 OsString::from("-N"),
@@ -351,11 +356,10 @@ impl<E: CommandExecutor> OpenSsh<E> {
     /// Checks a dedicated ControlMaster with `-O check`.
     pub fn check(&self, host_alias: &str, control_path: &Path) -> Result<SshOutput, SshError> {
         validate_host_alias(host_alias)?;
-        self.capture(control_operation_arguments(
-            host_alias,
-            control_path,
+        self.capture(
             "check",
-        ))
+            control_operation_arguments(host_alias, control_path, "check"),
+        )
     }
 
     /// Adds one local forward to a dedicated ControlMaster.
@@ -366,12 +370,10 @@ impl<E: CommandExecutor> OpenSsh<E> {
         forward: &LocalForwardSpec,
     ) -> Result<SshOutput, SshError> {
         validate_host_alias(host_alias)?;
-        self.capture(forward_operation_arguments(
-            host_alias,
-            control_path,
-            "forward",
-            forward,
-        ))
+        self.capture(
+            "add_local_forward",
+            forward_operation_arguments(host_alias, control_path, "forward", forward),
+        )
     }
 
     /// Cancels the exact normalized local forward previously added.
@@ -382,40 +384,82 @@ impl<E: CommandExecutor> OpenSsh<E> {
         forward: &LocalForwardSpec,
     ) -> Result<SshOutput, SshError> {
         validate_host_alias(host_alias)?;
-        self.capture(forward_operation_arguments(
-            host_alias,
-            control_path,
-            "cancel",
-            forward,
-        ))
+        self.capture(
+            "cancel_local_forward",
+            forward_operation_arguments(host_alias, control_path, "cancel", forward),
+        )
     }
 
     /// Stops a dedicated ControlMaster with `-O exit`.
     pub fn disconnect(&self, host_alias: &str, control_path: &Path) -> Result<SshOutput, SshError> {
         validate_host_alias(host_alias)?;
-        self.capture(control_operation_arguments(
-            host_alias,
-            control_path,
-            "exit",
-        ))
+        self.capture(
+            "disconnect",
+            control_operation_arguments(host_alias, control_path, "exit"),
+        )
     }
 
-    fn capture(&self, arguments: Vec<OsString>) -> Result<SshOutput, SshError> {
-        self.execute(arguments, ExecutionMode::Capture)
+    fn capture(
+        &self,
+        operation: &'static str,
+        arguments: Vec<OsString>,
+    ) -> Result<SshOutput, SshError> {
+        self.execute(operation, arguments, ExecutionMode::Capture)
     }
 
     fn execute(
         &self,
+        operation: &'static str,
         arguments: Vec<OsString>,
         mode: ExecutionMode,
     ) -> Result<SshOutput, SshError> {
+        let operation_id = crate::logging::next_operation_id();
+        let started = Instant::now();
+        tracing::debug!(
+            component = "ssh",
+            operation,
+            operation_id,
+            interactive = mode == ExecutionMode::Interactive,
+            "OpenSSH operation started"
+        );
         let command = SshCommand::new(self.executable.clone(), arguments);
-        self.executor
+        let result = self
+            .executor
             .execute(&command, mode)
             .map_err(|source| SshError::Execute {
                 executable: self.executable.clone(),
                 source,
-            })
+            });
+        match &result {
+            Ok(output) => tracing::debug!(
+                component = "ssh",
+                operation,
+                operation_id,
+                elapsed_ms = started.elapsed().as_millis(),
+                success = output.success,
+                exit_code = output.exit_code,
+                "OpenSSH operation completed"
+            ),
+            Err(SshError::Execute { source, .. }) => tracing::debug!(
+                component = "ssh",
+                operation,
+                operation_id,
+                elapsed_ms = started.elapsed().as_millis(),
+                success = false,
+                error_kind = ?source.kind(),
+                "OpenSSH operation could not be executed"
+            ),
+            Err(error) => tracing::debug!(
+                component = "ssh",
+                operation,
+                operation_id,
+                elapsed_ms = started.elapsed().as_millis(),
+                success = false,
+                error_kind = std::any::type_name_of_val(error),
+                "OpenSSH operation rejected before execution"
+            ),
+        }
+        result
     }
 }
 

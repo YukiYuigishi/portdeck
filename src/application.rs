@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 use std::io;
 use std::net::TcpListener;
+use std::time::Instant;
 
 use thiserror::Error;
 
@@ -174,6 +175,15 @@ impl<B: SshClient, P: PortProbe> AppState<B, P> {
         };
         self.rules.entry(target_id.clone()).or_default().push(rule);
         if let Err(error) = self.persist_rules() {
+            tracing::debug!(
+                component = "persistence",
+                operation = "rollback_add_rule",
+                operation_id = crate::logging::next_operation_id(),
+                target_id = target_id.as_str(),
+                rule_id = id.as_str(),
+                error_kind = "store",
+                "rolling back unsaved forward rule"
+            );
             if let Some(rules) = self.rules.get_mut(target_id)
                 && let Some(index) = rules.iter().position(|rule| rule.id == id)
             {
@@ -217,6 +227,15 @@ impl<B: SshClient, P: PortProbe> AppState<B, P> {
             remote_port: draft.remote_port,
         };
         if let Err(error) = self.persist_rules() {
+            tracing::debug!(
+                component = "persistence",
+                operation = "rollback_update_rule",
+                operation_id = crate::logging::next_operation_id(),
+                target_id = target_id.as_str(),
+                rule_id = current.id.as_str(),
+                error_kind = "store",
+                "restoring forward rule after persistence failure"
+            );
             self.rules
                 .get_mut(&target_id)
                 .expect("the selected rule's target exists")[index] = current;
@@ -271,6 +290,15 @@ impl<B: SshClient, P: PortProbe> AppState<B, P> {
             .expect("target was found")
             .remove(index);
         if let Err(error) = self.persist_rules() {
+            tracing::debug!(
+                component = "persistence",
+                operation = "rollback_remove_rule",
+                operation_id = crate::logging::next_operation_id(),
+                target_id = target_id.as_str(),
+                rule_id = removed.id.as_str(),
+                error_kind = "store",
+                "restoring forward rule after persistence failure"
+            );
             self.rules
                 .get_mut(&target_id)
                 .expect("target was found")
@@ -577,6 +605,13 @@ impl<B: SshClient, P: PortProbe> SessionManager<B, P> {
 
     /// Connects one target, confirming success with `-O check`.
     pub fn connect(&mut self, target_id: &TargetId) -> Result<(), ManagerError> {
+        let trace = start_target_operation("connect", target_id);
+        let result = self.connect_inner(target_id);
+        finish_operation("connect", trace, &result);
+        result
+    }
+
+    fn connect_inner(&mut self, target_id: &TargetId) -> Result<(), ManagerError> {
         let index = self.entry_index(target_id)?;
         let entry = &mut self.entries[index];
         if !matches!(
@@ -636,6 +671,13 @@ impl<B: SshClient, P: PortProbe> SessionManager<B, P> {
 
     /// Refreshes one ControlMaster state using `-O check`.
     pub fn check(&mut self, target_id: &TargetId) -> Result<bool, ManagerError> {
+        let trace = start_target_operation("check", target_id);
+        let result = self.check_inner(target_id);
+        finish_operation("check", trace, &result);
+        result
+    }
+
+    fn check_inner(&mut self, target_id: &TargetId) -> Result<bool, ManagerError> {
         let index = self.entry_index(target_id)?;
         let entry = &mut self.entries[index];
         let output = match self
@@ -669,6 +711,13 @@ impl<B: SshClient, P: PortProbe> SessionManager<B, P> {
 
     /// Stops one ControlMaster and deactivates all child forwards on success.
     pub fn disconnect(&mut self, target_id: &TargetId) -> Result<(), ManagerError> {
+        let trace = start_target_operation("disconnect", target_id);
+        let result = self.disconnect_inner(target_id);
+        finish_operation("disconnect", trace, &result);
+        result
+    }
+
+    fn disconnect_inner(&mut self, target_id: &TargetId) -> Result<(), ManagerError> {
         let index = self.entry_index(target_id)?;
         let entry = &mut self.entries[index];
         if entry.session.state == SessionState::Disconnected {
@@ -711,6 +760,17 @@ impl<B: SshClient, P: PortProbe> SessionManager<B, P> {
 
     /// Adds a saved rule to its connected ControlMaster with bounded port fallback.
     pub fn activate_forward(&mut self, rule: &ForwardRule) -> Result<u16, ManagerError> {
+        let trace = start_forward_operation("add_local_forward", rule);
+        let result = self.activate_forward_inner(rule, trace.operation_id);
+        finish_operation("add_local_forward", trace, &result);
+        result
+    }
+
+    fn activate_forward_inner(
+        &mut self,
+        rule: &ForwardRule,
+        operation_id: u64,
+    ) -> Result<u16, ManagerError> {
         let index = self.entry_index(&rule.target_id)?;
         let entry = &mut self.entries[index];
         if entry.session.state != SessionState::Connected {
@@ -733,8 +793,27 @@ impl<B: SshClient, P: PortProbe> SessionManager<B, P> {
         let mut last_conflict_detail = None;
 
         for candidate in candidates {
+            tracing::debug!(
+                component = "application",
+                operation = "forward_port_candidate",
+                operation_id,
+                target_id = rule.target_id.as_str(),
+                rule_id = rule.id.as_str(),
+                candidate_port = candidate,
+                "local forward port candidate selected"
+            );
             match self.port_probe.is_available(&rule.bind_address, candidate) {
                 Ok(false) => {
+                    tracing::debug!(
+                        component = "application",
+                        operation = "forward_port_candidate",
+                        operation_id,
+                        target_id = rule.target_id.as_str(),
+                        rule_id = rule.id.as_str(),
+                        candidate_port = candidate,
+                        available = false,
+                        "local forward port candidate unavailable"
+                    );
                     last_conflict_detail = Some(format!(
                         "ローカル側 {}:{candidate} は使用中です",
                         rule.bind_address
@@ -827,6 +906,13 @@ impl<B: SshClient, P: PortProbe> SessionManager<B, P> {
 
     /// Cancels an active forward using the exact normalized values used to add it.
     pub fn cancel_forward(&mut self, rule: &ForwardRule) -> Result<(), ManagerError> {
+        let trace = start_forward_operation("cancel_local_forward", rule);
+        let result = self.cancel_forward_inner(rule);
+        finish_operation("cancel_local_forward", trace, &result);
+        result
+    }
+
+    fn cancel_forward_inner(&mut self, rule: &ForwardRule) -> Result<(), ManagerError> {
         let index = self.entry_index(&rule.target_id)?;
         let entry = &mut self.entries[index];
         let runtime_forward = entry
@@ -1037,6 +1123,80 @@ pub enum ManagerError {
     Operation(Failure),
 }
 
+struct OperationTrace {
+    operation_id: u64,
+    started: Instant,
+}
+
+fn start_target_operation(operation: &'static str, target_id: &TargetId) -> OperationTrace {
+    let operation_id = crate::logging::next_operation_id();
+    tracing::debug!(
+        component = "application",
+        operation,
+        operation_id,
+        target_id = target_id.as_str(),
+        "application operation started"
+    );
+    OperationTrace {
+        operation_id,
+        started: Instant::now(),
+    }
+}
+
+fn start_forward_operation(operation: &'static str, rule: &ForwardRule) -> OperationTrace {
+    let operation_id = crate::logging::next_operation_id();
+    tracing::debug!(
+        component = "application",
+        operation,
+        operation_id,
+        target_id = rule.target_id.as_str(),
+        rule_id = rule.id.as_str(),
+        "application operation started"
+    );
+    OperationTrace {
+        operation_id,
+        started: Instant::now(),
+    }
+}
+
+fn finish_operation<T>(
+    operation: &'static str,
+    trace: OperationTrace,
+    result: &Result<T, ManagerError>,
+) {
+    tracing::debug!(
+        component = "application",
+        operation,
+        operation_id = trace.operation_id,
+        elapsed_ms = trace.started.elapsed().as_millis(),
+        success = result.is_ok(),
+        error_kind = result.as_ref().err().map(manager_error_kind),
+        "application operation completed"
+    );
+}
+
+fn manager_error_kind(error: &ManagerError) -> &'static str {
+    match error {
+        ManagerError::Runtime(_) => "runtime",
+        ManagerError::Transition(_) => "transition",
+        ManagerError::UnknownTarget(_) => "unknown_target",
+        ManagerError::UnknownForward(_) => "unknown_forward",
+        ManagerError::InvalidSessionState(_) => "invalid_session_state",
+        ManagerError::InvalidForwardState(_) => "invalid_forward_state",
+        ManagerError::MissingRuntimeForwardData => "missing_runtime_forward_data",
+        ManagerError::Operation(failure) => match failure.kind {
+            FailureKind::OpenSshNotFound => "openssh_not_found",
+            FailureKind::ConnectionFailed => "connection_failed",
+            FailureKind::ControlMasterUnavailable => "controlmaster_unavailable",
+            FailureKind::LocalPortConflict => "local_port_conflict",
+            FailureKind::ForwardRejected => "forward_rejected",
+            FailureKind::CancelFailed => "cancel_failed",
+            FailureKind::SshConfigurationFailed => "ssh_configuration_failed",
+            FailureKind::LocalOperationFailed => "local_operation_failed",
+        },
+    }
+}
+
 /// Returns at most `limit` sequential non-zero port candidates.
 pub fn port_candidates(start: u16, limit: usize) -> Vec<u16> {
     (start..=u16::MAX).take(limit).collect()
@@ -1157,7 +1317,9 @@ mod tests {
     use std::collections::VecDeque;
     use std::fs;
     use std::io;
+    use std::io::Write;
     use std::path::{Path, PathBuf};
+    use std::sync::{Arc, Mutex};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use crate::config::RuleStore;
@@ -1171,6 +1333,34 @@ mod tests {
         AppActionError, AppState, ForwardRuleDraft, PortProbe, RuleError, SessionManager,
         port_candidates,
     };
+
+    #[derive(Clone)]
+    struct CaptureWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for CaptureWriter {
+        fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buffer);
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn capture_debug_events(action: impl FnOnce()) -> String {
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let writer = Arc::clone(&captured);
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::DEBUG)
+            .with_writer(move || CaptureWriter(Arc::clone(&writer)))
+            .finish();
+        tracing::subscriber::with_default(subscriber, action);
+        let contents = captured.lock().unwrap().clone();
+        String::from_utf8(contents).unwrap()
+    }
 
     #[derive(Debug, Default)]
     struct FakeSsh {
@@ -1983,14 +2173,47 @@ mod tests {
         )
         .unwrap();
 
-        assert!(
-            app.add_rule(
-                &TargetId::new("dev"),
-                ForwardRuleDraft::parse("web", "", "", "", "3000").unwrap(),
-            )
-            .is_err()
-        );
+        let events = capture_debug_events(|| {
+            assert!(
+                app.add_rule(
+                    &TargetId::new("dev"),
+                    ForwardRuleDraft::parse("web", "", "", "", "3000").unwrap(),
+                )
+                .is_err()
+            );
+        });
         assert!(app.rules_for(&TargetId::new("dev")).is_empty());
+        assert!(events.contains("operation=\"save\""));
+        assert!(events.contains("operation=\"rollback_add_rule\""));
+        assert!(events.contains("operation_id"));
+    }
+
+    #[test]
+    fn debug_events_correlate_connect_forward_and_shutdown_without_raw_output() {
+        let test_runtime = TestRuntime::new();
+        let mut ssh = FakeSsh::successful();
+        ssh.forward.get_mut().push_back(success());
+        let mut manager = SessionManager::with_port_probe(
+            ssh,
+            test_runtime.runtime(),
+            vec![target()],
+            FakePortProbe::default(),
+        )
+        .unwrap();
+
+        let events = capture_debug_events(|| {
+            manager.connect(&TargetId::new("dev")).unwrap();
+            manager.activate_forward(&rule()).unwrap();
+            assert!(manager.shutdown_all().is_empty());
+        });
+
+        assert!(events.contains("operation=\"connect\""));
+        assert!(events.contains("operation=\"add_local_forward\""));
+        assert!(events.contains("operation=\"disconnect\""));
+        assert!(events.contains("operation_id"));
+        assert!(events.contains("elapsed_ms"));
+        assert!(!events.contains("OpenSSH_9.6p1"));
+        assert!(!events.contains("Permission denied"));
     }
 
     #[test]

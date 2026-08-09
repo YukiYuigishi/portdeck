@@ -4,6 +4,7 @@
 //! runtime resources, and terminal presentation in separate modules.
 
 pub mod application;
+pub mod cli;
 pub mod config;
 pub mod domain;
 pub mod error;

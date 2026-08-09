@@ -1,11 +1,11 @@
 //! Application-level error representation.
 
-use std::error::Error as StdError;
-
 use thiserror::Error;
 
 use crate::application::{ManagerError, RuleError};
+use crate::cli::CliError;
 use crate::config::{ConfigError, StoreError};
+use crate::logging::LoggingError;
 use crate::runtime::RuntimeError;
 use crate::ssh::SshError;
 use crate::tui::TuiError;
@@ -13,9 +13,9 @@ use crate::tui::TuiError;
 /// Error returned by portdeck application services.
 #[derive(Debug, Error)]
 pub enum AppError {
-    /// Installing the process-wide tracing subscriber failed.
-    #[error("failed to initialize structured logging: {0}")]
-    LoggingInitialization(#[source] Box<dyn StdError + Send + Sync + 'static>),
+    /// DEBUG file setup or tracing subscriber installation failed.
+    #[error(transparent)]
+    Logging(#[from] LoggingError),
     /// SSH target discovery failed.
     #[error(transparent)]
     Configuration(#[from] ConfigError),
@@ -44,8 +44,8 @@ pub enum AppError {
     #[error("failed to stop owned SSH sessions: {0}")]
     Shutdown(String),
     /// Unsupported command-line input.
-    #[error("unknown argument: {0}")]
-    UnknownArgument(String),
+    #[error(transparent)]
+    Cli(#[from] CliError),
 }
 
 /// Result type used by portdeck application services.

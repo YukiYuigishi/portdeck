@@ -1,6 +1,6 @@
 # Add a file-backed DEBUG mode
 
-- Status: Proposed
+- Status: Resolved
 - Priority: Medium
 - Reported: 2026-08-09
 - Component: `cli`, `logging`, `application`, `ssh`, `tui`
@@ -94,14 +94,26 @@ DEBUG modeは`StrictHostKeyChecking`、暗号方式、認証方式、ProxyJump�
 
 ## Acceptance criteria
 
-- [ ] `portdeck --debug`でTUIを起動できる。
-- [ ] DEBUGログがXDG State配下の実行ごとのファイルへ保存される。
-- [ ] ログdirectoryは`0700`、fileは`0600`である。
-- [ ] ログパスを起動時とTUI上で確認できる。
-- [ ] SSH・forward・永続化・shutdownの開始と結果を追跡できる。
-- [ ] DEBUGログがTUI画面を崩さない。
-- [ ] 認証情報、環境変数全体、生キー入力、raw OpenSSH出力を記録しない。
-- [ ] DEBUG modeがOpenSSHの安全設定や接続挙動を変更しない。
-- [ ] ログ保持数に上限があり、所有外ファイルを削除しない。
-- [ ] CLI、permission、redaction、TUI非干渉の回帰テストがある。
-- [ ] READMEへ利用方法とログ保存先を記載する。
+- [x] `portdeck --debug`でTUIを起動できる。
+- [x] DEBUGログがXDG State配下の実行ごとのファイルへ保存される。
+- [x] ログdirectoryは`0700`、fileは`0600`である。
+- [x] ログパスを起動時とTUI上で確認できる。
+- [x] SSH・forward・永続化・shutdownの開始と結果を追跡できる。
+- [x] DEBUGログがTUI画面を崩さない。
+- [x] 認証情報、環境変数全体、生キー入力、raw OpenSSH出力を記録しない。
+- [x] DEBUG modeがOpenSSHの安全設定や接続挙動を変更しない。
+- [x] ログ保持数に上限があり、所有外ファイルを削除しない。
+- [x] CLI、permission、redaction、TUI非干渉の回帰テストがある。
+- [x] READMEへ利用方法とログ保存先を記載する。
+
+## Resolution
+
+2026-08-09に実装・検証した。
+
+- CLI解析をlogging初期化より前へ移し、`--debug`と`--debug --diagnose`を追加した。
+- XDG State fallback、所有者検証、`0700` directory、`0600`かつ一意なper-run fileを実装した。
+- DEBUG subscriberのwriterをファイルだけへ固定し、端末へはalternate screen前のログパス通知だけを出す。
+- OpenSSHの操作結果はoperation、終了コード、所要時間、分類済みerrorだけを記録し、argvとraw outputは記録しない。
+- application、domain、persistence、runtime、TUI commandへoperation ID付きeventを追加した。フォーム入力と生key eventは記録しない。
+- 所有ファイル名へ厳密に一致する古いログだけを、新しい10件を保持する範囲で1起動最大64件まで削除する。
+- CLI、XDG/fallback、一意性、permission、保持整理、初期化失敗、file-only writer、redaction、主要operationの相関を回帰テストで確認した。

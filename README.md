@@ -18,10 +18,25 @@ MVPはOpenSSH 9.6p1で実通信を含めて検証しています。これより�
 ```console
 cargo install --path .
 portdeck --diagnose
+portdeck --debug --diagnose
 portdeck
 ```
 
 `--diagnose`は`ssh -V`を実行し、使用されるOpenSSHのバージョンを表示します。`--help`と`--version`も利用できます。
+
+### DEBUG mode
+
+障害調査時は`portdeck --debug`でTUIを起動すると、DEBUG levelの構造化ログを実行ごとのファイルへ保存します。`portdeck --debug --diagnose`でも同じ形式のログを利用できます。保存先は次のとおりです。
+
+```text
+$XDG_STATE_HOME/portdeck/debug-<timestamp>-<pid>.log
+# XDG_STATE_HOMEが未設定の場合:
+$HOME/.local/state/portdeck/debug-<timestamp>-<pid>.log
+```
+
+ログdirectoryはmode `0700`、ログファイルはmode `0600`です。実際のパスはalternate screenへ入る前に端末へ1行表示し、TUIの起動Statusとエラー詳細からも確認できます。過去ログは新しいものを最大10件保持するよう、1起動につき最大64件まで整理します。`debug-<数値>-<数値>.log`へ厳密に一致するportdeck所有名だけが対象で、それ以外のファイルは変更しません。
+
+DEBUG eventは接続、状態確認、切断、転送の追加・取消、port候補、状態遷移、設定保存・rollback、runtime回収、shutdownをoperation IDとともに記録します。TUI描画中のstdout／stderrへDEBUG eventは出しません。パスワード、鍵のパスフレーズ、環境変数全体、生のキー入力、OpenSSHのraw stdout／stderrは記録しません。DEBUG modeによってOpenSSHの設定や接続引数が変わることもありません。
 
 接続候補は`~/.ssh/config`と再帰的な`Include`から収集します。`Host *`、ワイルドカード、否定パターンは候補には表示しませんが、その設定は`ssh -G <alias>`と実際の接続時にOpenSSHが通常どおり適用します。portdeckはSSH設定ファイルを変更しません。
 
@@ -108,6 +123,7 @@ ControlPathは`$XDG_RUNTIME_DIR/portdeck/`に置きます。`XDG_RUNTIME_DIR`が
 - コマンドはシェル文字列ではなく、個別のargvとしてOpenSSHへ渡します。
 - `StrictHostKeyChecking=no`や`UserKnownHostsFile=/dev/null`を追加しません。
 - パスワード、秘密鍵、鍵パスフレーズを取得・保存・ログ出力しません。
+- DEBUG modeでも環境変数全体、生のキー入力、OpenSSHのraw stdout／stderrをログ出力しません。
 - ユーザーの`~/.ssh/config`、`known_hosts`、秘密鍵を変更しません。
 - 専用masterでは`ClearAllForwardings=yes`を使い、SSH設定由来の未追跡forwardを混在させません。
 - 追加・取消の最終成否はOpenSSHの終了ステータスで判定します。事前のport bind確認だけで`Active`にはしません。
@@ -120,6 +136,7 @@ ControlPathは`$XDG_RUNTIME_DIR/portdeck/`に置きます。`XDG_RUNTIME_DIR`が
 - 接続・認証に失敗する: `E`でOpenSSH stderrを表示し、同じaliasに`ssh <alias>`で接続できるか確認してください。portdeckは認証方式やホスト鍵設定を緩和して再試行しません。
 - 転送を追加できない: ローカルポート競合、サーバーの`AllowTcpForwarding`、リモート宛先を確認してください。
 - 状態が古い: `r`でControlMasterを再確認してください。切断を検出すると配下の転送も`Unavailable`になります。
+- 詳細な操作経路が必要: `portdeck --debug`で再現し、起動時またはTUIに表示された所有者限定ログを確認してください。共有前に運用上のhost名やport番号も確認してください。
 - 設定ファイルが壊れている: portdeckはファイルを上書きせず、パース診断を表示して終了します。内容を修正してから再起動してください。
 
 ## Development

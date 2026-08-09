@@ -55,6 +55,8 @@ pub enum Confirmation {
 pub enum Mode {
     /// Normal list navigation.
     Normal,
+    /// Editing the case-insensitive target alias filter.
+    TargetSearch,
     /// Editing a new forward rule.
     ForwardForm,
     /// Warning before accepting a public bind.
@@ -143,6 +145,12 @@ pub struct UiState {
     pub selected_target: usize,
     /// Selected rule index for the current target.
     pub selected_forward: usize,
+    /// Case-insensitive substring filter for target aliases.
+    pub target_filter: String,
+    /// Confirmed filter restored when search editing is cancelled.
+    pub search_original_filter: String,
+    /// Target selected when the current search edit began.
+    pub search_anchor: Option<TargetId>,
     /// Current interaction mode.
     pub mode: Mode,
     /// One-line operation summary.
@@ -333,6 +341,7 @@ fn handle_key<B: SshClient, P: PortProbe>(
 ) -> UiCommand {
     match ui.mode.clone() {
         Mode::Normal => handle_normal_key(ui, app, key),
+        Mode::TargetSearch => handle_search_key(ui, app, key),
         Mode::ForwardForm => handle_form_key(ui, app, key),
         Mode::PublicBindWarning => handle_public_warning_key(ui, app, key),
         Mode::Confirm(confirmation) => handle_confirmation_key(ui, key, confirmation),
@@ -368,6 +377,13 @@ fn handle_normal_key<B: SshClient, P: PortProbe>(
         }
         KeyCode::Right | KeyCode::Char('l') => {
             ui.focus = Focus::Forwards;
+            UiCommand::None
+        }
+        KeyCode::Char('/') => {
+            ui.search_original_filter.clone_from(&ui.target_filter);
+            ui.search_anchor = selected_target_id(ui, app).cloned();
+            ui.focus = Focus::Targets;
+            ui.mode = Mode::TargetSearch;
             UiCommand::None
         }
         KeyCode::Up | KeyCode::Char('k') => {
@@ -413,6 +429,58 @@ fn handle_normal_key<B: SshClient, P: PortProbe>(
             UiCommand::None
         }
         KeyCode::Char('q') => request_quit(ui, app),
+        _ => UiCommand::None,
+    }
+}
+
+fn handle_search_key<B: SshClient, P: PortProbe>(
+    ui: &mut UiState,
+    app: &AppState<B, P>,
+    key: KeyEvent,
+) -> UiCommand {
+    if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+        return request_quit(ui, app);
+    }
+
+    match key.code {
+        KeyCode::Esc => {
+            ui.target_filter.clone_from(&ui.search_original_filter);
+            let anchor = ui.search_anchor.take();
+            sync_target_selection(ui, app, anchor.as_ref());
+            ui.mode = Mode::Normal;
+            UiCommand::None
+        }
+        KeyCode::Enter => {
+            if ui.target_filter.is_empty() {
+                let anchor = ui.search_anchor.clone();
+                sync_target_selection(ui, app, anchor.as_ref());
+            }
+            ui.search_anchor = None;
+            ui.search_original_filter.clear();
+            ui.mode = Mode::Normal;
+            UiCommand::None
+        }
+        KeyCode::Backspace => {
+            let current = selected_target_id(ui, app).cloned();
+            ui.target_filter.pop();
+            let preferred = if ui.target_filter.is_empty() {
+                ui.search_anchor.clone()
+            } else {
+                current
+            };
+            sync_target_selection(ui, app, preferred.as_ref());
+            UiCommand::None
+        }
+        KeyCode::Char(character)
+            if !key
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+        {
+            let current = selected_target_id(ui, app).cloned();
+            ui.target_filter.push(character);
+            sync_target_selection(ui, app, current.as_ref());
+            UiCommand::None
+        }
         _ => UiCommand::None,
     }
 }
@@ -590,7 +658,7 @@ fn move_selection<B: SshClient, P: PortProbe>(
 ) {
     match ui.focus {
         Focus::Targets => {
-            let count = app.sessions().entries().len();
+            let count = visible_target_indices(ui, app).len();
             ui.selected_target = wrapped_index(ui.selected_target, count, forward);
             ui.selected_forward = 0;
         }
@@ -706,6 +774,9 @@ impl Default for UiState {
             focus: Focus::Targets,
             selected_target: 0,
             selected_forward: 0,
+            target_filter: String::new(),
+            search_original_filter: String::new(),
+            search_anchor: None,
             mode: Mode::Normal,
             status: "準備完了".to_owned(),
             error_detail: None,
@@ -719,7 +790,7 @@ impl Default for UiState {
 impl UiState {
     /// Keeps selections valid after catalog changes.
     pub fn clamp<B: SshClient, P: PortProbe>(&mut self, app: &AppState<B, P>) {
-        let target_count = app.sessions().entries().len();
+        let target_count = visible_target_indices(self, app).len();
         self.selected_target = clamp_index(self.selected_target, target_count);
         let forward_count = selected_target_id(self, app)
             .map(|target_id| app.rules_for(target_id).len())
@@ -754,9 +825,17 @@ pub fn render<B: SshClient, P: PortProbe>(
 ) {
     let area = frame.area();
     if area.width < 24 || area.height < 6 {
+        let message = if ui.mode == Mode::TargetSearch {
+            format!(
+                "Search /{} [{}]\nq: quit",
+                ui.target_filter,
+                visible_target_indices(ui, app).len()
+            )
+        } else {
+            "portdeck: terminal too small\nq: quit".to_owned()
+        };
         frame.render_widget(
-            Paragraph::new("portdeck: terminal too small\nq: quit")
-                .block(Block::default().borders(Borders::ALL)),
+            Paragraph::new(message).block(Block::default().borders(Borders::ALL)),
             area,
         );
         return;
@@ -782,7 +861,7 @@ pub fn render<B: SshClient, P: PortProbe>(
         render_targets(frame, panes[0], ui, app);
         render_forwards(frame, panes[1], ui, app);
     }
-    render_footer(frame, rows[1], ui);
+    render_footer(frame, rows[1], ui, app);
     render_modal(frame, area, ui);
 }
 
@@ -792,10 +871,10 @@ fn render_targets<B: SshClient, P: PortProbe>(
     ui: &UiState,
     app: &AppState<B, P>,
 ) {
-    let target_rows = app
-        .sessions()
-        .entries()
-        .iter()
+    let entries = app.sessions().entries();
+    let target_rows = visible_target_indices(ui, app)
+        .into_iter()
+        .map(|index| &entries[index])
         .map(|entry| TargetRow {
             alias: entry.target.host_alias.clone(),
             destination: entry.effective_config.as_ref().map(|config| {
@@ -814,7 +893,7 @@ fn render_targets<B: SshClient, P: PortProbe>(
                 .count(),
         })
         .collect::<Vec<_>>();
-    let items = target_rows
+    let mut items = target_rows
         .iter()
         .map(|row| {
             let destination = row
@@ -831,6 +910,9 @@ fn render_targets<B: SshClient, P: PortProbe>(
             ))
         })
         .collect::<Vec<_>>();
+    if items.is_empty() {
+        items.push(ListItem::new("一致する接続先がありません"));
+    }
     let border_style = focus_border(ui.focus == Focus::Targets);
     let list = List::new(items)
         .block(
@@ -924,19 +1006,34 @@ fn forward_rows<B: SshClient, P: PortProbe>(ui: &UiState, app: &AppState<B, P>) 
         .collect()
 }
 
-fn render_footer(frame: &mut Frame<'_>, area: Rect, ui: &UiState) {
+fn render_footer<B: SshClient, P: PortProbe>(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    ui: &UiState,
+    app: &AppState<B, P>,
+) {
     let help = match ui.mode {
         Mode::Normal => {
-            "Tab/h/l: pane  ↑↓: select  c: connect  d: disconnect  a: add  Space: activate/cancel  D: delete  r: check  e: error  q: quit"
+            "/: search  Tab/h/l: pane  ↑↓: select  c: connect  d: disconnect  a: add  Space: activate/cancel  D: delete  r: check  e: error  q: quit"
         }
+        Mode::TargetSearch => "Type: filter  Backspace: delete  Enter: apply  Esc: cancel",
         Mode::ForwardForm => "Tab/↑↓: field  Enter: save  Esc: cancel",
         Mode::PublicBindWarning | Mode::Confirm(_) => "y/Enter: confirm  n/Esc: cancel",
         Mode::ErrorDetails => "Esc/e/Enter: close",
     };
+    let status = if ui.mode == Mode::TargetSearch {
+        format!(
+            "Search /{}  [{} matches]",
+            ui.target_filter,
+            visible_target_indices(ui, app).len()
+        )
+    } else {
+        ui.status.clone()
+    };
     frame.render_widget(
         Paragraph::new(vec![
             Line::from(vec![Span::styled(
-                &ui.status,
+                status,
                 Style::default().fg(Color::Yellow),
             )]),
             Line::from(help),
@@ -948,6 +1045,7 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, ui: &UiState) {
 fn render_modal(frame: &mut Frame<'_>, area: Rect, ui: &UiState) {
     match &ui.mode {
         Mode::Normal => {}
+        Mode::TargetSearch => {}
         Mode::ForwardForm => render_forward_form(frame, area, ui),
         Mode::PublicBindWarning => render_message_modal(
             frame,
@@ -1063,10 +1161,43 @@ fn selected_target_id<'a, B: SshClient, P: PortProbe>(
     ui: &UiState,
     app: &'a AppState<B, P>,
 ) -> Option<&'a TargetId> {
+    let entry_index = *visible_target_indices(ui, app).get(ui.selected_target)?;
     app.sessions()
         .entries()
-        .get(ui.selected_target)
+        .get(entry_index)
         .map(|entry| &entry.target.id)
+}
+
+fn visible_target_indices<B: SshClient, P: PortProbe>(
+    ui: &UiState,
+    app: &AppState<B, P>,
+) -> Vec<usize> {
+    let query = ui.target_filter.to_lowercase();
+    app.sessions()
+        .entries()
+        .iter()
+        .enumerate()
+        .filter_map(|(index, entry)| {
+            (query.is_empty() || entry.target.host_alias.to_lowercase().contains(&query))
+                .then_some(index)
+        })
+        .collect()
+}
+
+fn sync_target_selection<B: SshClient, P: PortProbe>(
+    ui: &mut UiState,
+    app: &AppState<B, P>,
+    preferred: Option<&TargetId>,
+) {
+    let visible = visible_target_indices(ui, app);
+    ui.selected_target = preferred
+        .and_then(|target_id| {
+            visible
+                .iter()
+                .position(|index| app.sessions().entries()[*index].target.id == *target_id)
+        })
+        .unwrap_or(0);
+    ui.selected_forward = 0;
 }
 
 fn session_symbol(state: SessionState) -> &'static str {
@@ -1219,6 +1350,10 @@ mod tests {
 
     impl Fixture {
         fn new() -> Self {
+            Self::with_aliases(&["dev-server"])
+        }
+
+        fn with_aliases(aliases: &[&str]) -> Self {
             let unique = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
@@ -1226,24 +1361,30 @@ mod tests {
             let runtime_path = std::env::temp_dir()
                 .join(format!("portdeck-tui-test-{}-{unique}", std::process::id()));
             let runtime = RuntimeDirectory::prepare(&runtime_path).unwrap();
-            let target = Target {
-                id: TargetId::new("dev"),
-                host_alias: "dev-server".to_owned(),
-                source: PathBuf::from("config"),
-            };
-            let manager = SessionManager::with_port_probe(
-                FakeSsh::default(),
-                runtime,
-                vec![target],
-                Available,
-            )
-            .unwrap();
+            let targets = aliases
+                .iter()
+                .enumerate()
+                .map(|(index, alias)| Target {
+                    id: TargetId::new(if index == 0 {
+                        "dev".to_owned()
+                    } else {
+                        format!("target-{index}")
+                    }),
+                    host_alias: (*alias).to_owned(),
+                    source: PathBuf::from("config"),
+                })
+                .collect();
+            let manager =
+                SessionManager::with_port_probe(FakeSsh::default(), runtime, targets, Available)
+                    .unwrap();
             let mut app = AppState::new(manager, Vec::new()).unwrap();
-            app.add_rule(
-                &TargetId::new("dev"),
-                ForwardRuleDraft::parse("web", "", "8080", "", "3000").unwrap(),
-            )
-            .unwrap();
+            if !aliases.is_empty() {
+                app.add_rule(
+                    &TargetId::new("dev"),
+                    ForwardRuleDraft::parse("web", "", "8080", "", "3000").unwrap(),
+                )
+                .unwrap();
+            }
             Self { app, runtime_path }
         }
     }
@@ -1455,6 +1596,275 @@ mod tests {
 
         assert_eq!(ui.form.label, "hl");
         assert_eq!(ui.focus, Focus::Targets);
+    }
+
+    #[test]
+    fn target_search_filters_case_insensitively_and_keeps_matching_selection() {
+        let fixture = Fixture::with_aliases(&["dev-server", "PROD-DB", "staging-dev"]);
+        let mut ui = UiState {
+            selected_target: 2,
+            focus: Focus::Forwards,
+            ..UiState::default()
+        };
+
+        handle_key(
+            &mut ui,
+            &fixture.app,
+            KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE),
+        );
+        for character in "DEV".chars() {
+            handle_key(
+                &mut ui,
+                &fixture.app,
+                KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE),
+            );
+        }
+
+        assert_eq!(ui.mode, Mode::TargetSearch);
+        assert_eq!(ui.focus, Focus::Targets);
+        assert_eq!(ui.target_filter, "DEV");
+        assert_eq!(
+            super::selected_target_id(&ui, &fixture.app),
+            Some(&TargetId::new("target-2"))
+        );
+
+        handle_key(
+            &mut ui,
+            &fixture.app,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        );
+        assert_eq!(ui.mode, Mode::Normal);
+    }
+
+    #[test]
+    fn target_search_falls_back_to_first_match_and_routes_target_commands() {
+        let fixture = Fixture::with_aliases(&["dev-server", "PROD-DB", "staging-dev"]);
+        let mut ui = UiState::default();
+
+        handle_key(
+            &mut ui,
+            &fixture.app,
+            KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE),
+        );
+        for character in "prod".chars() {
+            handle_key(
+                &mut ui,
+                &fixture.app,
+                KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE),
+            );
+        }
+        handle_key(
+            &mut ui,
+            &fixture.app,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        );
+
+        assert_eq!(
+            handle_key(
+                &mut ui,
+                &fixture.app,
+                KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE),
+            ),
+            UiCommand::Connect(TargetId::new("target-1"))
+        );
+        assert_eq!(
+            handle_key(
+                &mut ui,
+                &fixture.app,
+                KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE),
+            ),
+            UiCommand::Check(TargetId::new("target-1"))
+        );
+        handle_key(
+            &mut ui,
+            &fixture.app,
+            KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE),
+        );
+        assert_eq!(
+            ui.mode,
+            Mode::Confirm(Confirmation::Disconnect(TargetId::new("target-1")))
+        );
+    }
+
+    #[test]
+    fn filtered_target_and_forwards_panes_reference_the_same_target() {
+        let mut fixture = Fixture::with_aliases(&["dev-server", "PROD-DB"]);
+        fixture
+            .app
+            .add_rule(
+                &TargetId::new("target-1"),
+                ForwardRuleDraft::parse("database", "", "5432", "db", "5432").unwrap(),
+            )
+            .unwrap();
+        let ui = UiState {
+            target_filter: "prod".to_owned(),
+            ..UiState::default()
+        };
+        let mut terminal = Terminal::new(TestBackend::new(100, 12)).unwrap();
+
+        terminal
+            .draw(|frame| render(frame, &ui, &fixture.app))
+            .unwrap();
+
+        let contents = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect::<String>();
+        assert!(contents.contains("PROD-DB"));
+        assert!(contents.contains("database"));
+        assert!(contents.contains("127.0.0.1:5432"));
+        assert!(!contents.contains("dev-server"));
+        assert!(!contents.contains("web"));
+    }
+
+    #[test]
+    fn cancelling_search_restores_filter_and_pre_search_target() {
+        let fixture = Fixture::with_aliases(&["dev-server", "PROD-DB", "staging-dev"]);
+        let mut ui = UiState {
+            selected_target: 1,
+            target_filter: "dev".to_owned(),
+            ..UiState::default()
+        };
+
+        handle_key(
+            &mut ui,
+            &fixture.app,
+            KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE),
+        );
+        handle_key(
+            &mut ui,
+            &fixture.app,
+            KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE),
+        );
+        assert!(super::selected_target_id(&ui, &fixture.app).is_none());
+        handle_key(
+            &mut ui,
+            &fixture.app,
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+        );
+
+        assert_eq!(ui.mode, Mode::Normal);
+        assert_eq!(ui.target_filter, "dev");
+        assert_eq!(
+            super::selected_target_id(&ui, &fixture.app),
+            Some(&TargetId::new("target-2"))
+        );
+    }
+
+    #[test]
+    fn empty_confirmed_search_clears_filter_and_restores_anchor() {
+        let fixture = Fixture::with_aliases(&["dev-server", "PROD-DB", "staging-dev"]);
+        let mut ui = UiState {
+            target_filter: "prod".to_owned(),
+            ..UiState::default()
+        };
+
+        handle_key(
+            &mut ui,
+            &fixture.app,
+            KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE),
+        );
+        for _ in 0..4 {
+            handle_key(
+                &mut ui,
+                &fixture.app,
+                KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE),
+            );
+        }
+        handle_key(
+            &mut ui,
+            &fixture.app,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        );
+
+        assert!(ui.target_filter.is_empty());
+        assert_eq!(
+            super::selected_target_id(&ui, &fixture.app),
+            Some(&TargetId::new("target-1"))
+        );
+    }
+
+    #[test]
+    fn search_accepts_vim_keys_as_text_and_ctrl_c_keeps_quit_semantics() {
+        let fixture = Fixture::new();
+        let mut ui = UiState {
+            mode: Mode::TargetSearch,
+            ..UiState::default()
+        };
+
+        for character in ['h', 'l'] {
+            handle_key(
+                &mut ui,
+                &fixture.app,
+                KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE),
+            );
+        }
+        assert_eq!(ui.target_filter, "hl");
+        assert_eq!(
+            handle_key(
+                &mut ui,
+                &fixture.app,
+                KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+            ),
+            UiCommand::Quit
+        );
+    }
+
+    #[test]
+    fn zero_match_search_renders_empty_state_and_search_status() {
+        let fixture = Fixture::new();
+        let ui = UiState {
+            target_filter: "missing".to_owned(),
+            mode: Mode::TargetSearch,
+            ..UiState::default()
+        };
+        let mut terminal = Terminal::new(TestBackend::new(100, 10)).unwrap();
+
+        terminal
+            .draw(|frame| render(frame, &ui, &fixture.app))
+            .unwrap();
+
+        let contents = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect::<String>();
+        assert!(
+            contents
+                .replace(' ', "")
+                .contains("一致する接続先がありません")
+        );
+        assert!(contents.contains("Search /missing  [0 matches]"));
+    }
+
+    #[test]
+    fn tiny_terminal_search_render_never_panics() {
+        let fixture = Fixture::new();
+        let ui = UiState {
+            target_filter: "x".to_owned(),
+            mode: Mode::TargetSearch,
+            ..UiState::default()
+        };
+        let mut terminal = Terminal::new(TestBackend::new(20, 4)).unwrap();
+
+        terminal
+            .draw(|frame| render(frame, &ui, &fixture.app))
+            .unwrap();
+
+        let contents = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect::<String>();
+        assert!(contents.contains("Search /x [0]"));
+        assert!(contents.contains("q: quit"));
     }
 
     #[test]

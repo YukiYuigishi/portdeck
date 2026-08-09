@@ -27,7 +27,7 @@ use signal_hook::flag;
 use thiserror::Error;
 
 use crate::application::{AppActionError, AppState, ForwardRuleDraft, ManagerError, PortProbe};
-use crate::domain::{ForwardRuleId, ForwardState, SessionState, TargetId};
+use crate::domain::{ForwardRule, ForwardRuleId, ForwardState, SessionState, TargetId};
 use crate::ssh::SshClient;
 
 /// Pane receiving navigation keys.
@@ -100,6 +100,21 @@ impl Default for ForwardForm {
 impl ForwardForm {
     const FIELD_COUNT: usize = 5;
 
+    /// Prefills the shared add/edit form from one saved definition.
+    pub fn from_rule(rule: &ForwardRule) -> Self {
+        Self {
+            selected_field: 0,
+            label: rule.label.clone().unwrap_or_default(),
+            bind_address: rule.bind_address.clone(),
+            local_port: rule
+                .requested_local_port
+                .map(|port| port.to_string())
+                .unwrap_or_default(),
+            remote_host: rule.remote_host.clone(),
+            remote_port: rule.remote_port.to_string(),
+        }
+    }
+
     /// Parses the current values using application validation.
     pub fn draft(&self) -> Result<ForwardRuleDraft, crate::application::RuleError> {
         ForwardRuleDraft::parse(
@@ -161,6 +176,8 @@ pub struct UiState {
     pub form: ForwardForm,
     /// Validated public-bind form awaiting confirmation.
     pub pending_draft: Option<ForwardRuleDraft>,
+    /// Rule being edited in the shared form, or `None` while adding.
+    pub editing_rule: Option<ForwardRuleId>,
     /// Whether the event loop should stop.
     pub should_quit: bool,
 }
@@ -172,6 +189,7 @@ enum UiCommand {
     Disconnect(TargetId),
     Check(TargetId),
     AddForward(TargetId, ForwardRuleDraft),
+    UpdateForward(ForwardRuleId, ForwardRuleDraft),
     ActivateForward(ForwardRuleId),
     CancelForward(ForwardRuleId),
     DeleteForward(ForwardRuleId),
@@ -191,7 +209,7 @@ pub enum TuiError {
 pub struct StartupNotice {
     /// One-line startup summary.
     pub status: String,
-    /// Details opened with `e`.
+    /// Details opened with `E`.
     pub error_detail: Option<String>,
 }
 
@@ -346,7 +364,7 @@ fn handle_key<B: SshClient, P: PortProbe>(
         Mode::PublicBindWarning => handle_public_warning_key(ui, app, key),
         Mode::Confirm(confirmation) => handle_confirmation_key(ui, key, confirmation),
         Mode::ErrorDetails => {
-            if matches!(key.code, KeyCode::Esc | KeyCode::Enter | KeyCode::Char('e')) {
+            if matches!(key.code, KeyCode::Esc | KeyCode::Enter | KeyCode::Char('E')) {
                 ui.mode = Mode::Normal;
             }
             UiCommand::None
@@ -407,10 +425,13 @@ fn handle_normal_key<B: SshClient, P: PortProbe>(
         KeyCode::Char('a') => {
             if selected_target_id(ui, app).is_some() {
                 ui.form = ForwardForm::default();
+                ui.editing_rule = None;
+                ui.pending_draft = None;
                 ui.mode = Mode::ForwardForm;
             }
             UiCommand::None
         }
+        KeyCode::Char('e') => begin_rule_edit(ui, app),
         KeyCode::Char(' ') => selected_forward_command(ui, app),
         KeyCode::Char('D') => {
             if let Some(rule_id) = selected_rule_id(ui, app).cloned() {
@@ -422,7 +443,7 @@ fn handle_normal_key<B: SshClient, P: PortProbe>(
             .cloned()
             .map(UiCommand::Check)
             .unwrap_or(UiCommand::None),
-        KeyCode::Char('e') => {
+        KeyCode::Char('E') => {
             if ui.error_detail.is_some() {
                 ui.mode = Mode::ErrorDetails;
             }
@@ -492,6 +513,9 @@ fn handle_form_key<B: SshClient, P: PortProbe>(
 ) -> UiCommand {
     match key.code {
         KeyCode::Esc => {
+            ui.form = ForwardForm::default();
+            ui.editing_rule = None;
+            ui.pending_draft = None;
             ui.mode = Mode::Normal;
             UiCommand::None
         }
@@ -526,11 +550,7 @@ fn handle_form_key<B: SshClient, P: PortProbe>(
                     ui.mode = Mode::PublicBindWarning;
                     UiCommand::None
                 }
-                Ok(draft) => {
-                    ui.form = ForwardForm::default();
-                    ui.mode = Mode::Normal;
-                    UiCommand::AddForward(target_id, draft)
-                }
+                Ok(draft) => finish_forward_form(ui, target_id, draft),
                 Err(error) => {
                     set_error(ui, "転送ルールを保存できません", Some(error.to_string()));
                     UiCommand::None
@@ -557,9 +577,7 @@ fn handle_public_warning_key<B: SshClient, P: PortProbe>(
                 ui.mode = Mode::Normal;
                 return UiCommand::None;
             };
-            ui.form = ForwardForm::default();
-            ui.mode = Mode::Normal;
-            UiCommand::AddForward(target_id, draft)
+            finish_forward_form(ui, target_id, draft)
         }
         KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
             ui.pending_draft = None;
@@ -626,6 +644,10 @@ fn execute_ui_command<B: SshClient, P: PortProbe>(
             Ok(_) => set_success(ui, "転送ルールを保存しました（未有効）"),
             Err(error) => set_error(ui, "転送ルールを保存できません", Some(error.to_string())),
         },
+        UiCommand::UpdateForward(rule_id, draft) => match app.update_rule(&rule_id, draft) {
+            Ok(()) => set_success(ui, "転送ルールを更新しました（未有効）"),
+            Err(error) => set_action_error(ui, &error),
+        },
         UiCommand::ActivateForward(rule_id) => match app.activate_rule(&rule_id) {
             Ok(port) => set_success(ui, &format!("ローカル側port {port} で転送を開始しました")),
             Err(error) => set_action_error(ui, &error),
@@ -669,6 +691,43 @@ fn move_selection<B: SshClient, P: PortProbe>(
             ui.selected_forward = wrapped_index(ui.selected_forward, count, forward);
         }
     }
+}
+
+fn begin_rule_edit<B: SshClient, P: PortProbe>(
+    ui: &mut UiState,
+    app: &AppState<B, P>,
+) -> UiCommand {
+    if ui.focus != Focus::Forwards {
+        return UiCommand::None;
+    }
+    let Some(rule_id) = selected_rule_id(ui, app).cloned() else {
+        return UiCommand::None;
+    };
+    match app.editable_rule(&rule_id) {
+        Ok(rule) => {
+            ui.form = ForwardForm::from_rule(rule);
+            ui.editing_rule = Some(rule_id);
+            ui.pending_draft = None;
+            ui.mode = Mode::ForwardForm;
+        }
+        Err(error) => set_action_error(ui, &error),
+    }
+    UiCommand::None
+}
+
+fn finish_forward_form(
+    ui: &mut UiState,
+    target_id: TargetId,
+    draft: ForwardRuleDraft,
+) -> UiCommand {
+    let command = match ui.editing_rule.take() {
+        Some(rule_id) => UiCommand::UpdateForward(rule_id, draft),
+        None => UiCommand::AddForward(target_id, draft),
+    };
+    ui.form = ForwardForm::default();
+    ui.pending_draft = None;
+    ui.mode = Mode::Normal;
+    command
 }
 
 fn selected_forward_command<B: SshClient, P: PortProbe>(
@@ -782,6 +841,7 @@ impl Default for UiState {
             error_detail: None,
             form: ForwardForm::default(),
             pending_draft: None,
+            editing_rule: None,
             should_quit: false,
         }
     }
@@ -1014,12 +1074,12 @@ fn render_footer<B: SshClient, P: PortProbe>(
 ) {
     let help = match ui.mode {
         Mode::Normal => {
-            "/: search  Tab/h/l: pane  ↑↓: select  c: connect  d: disconnect  a: add  Space: activate/cancel  D: delete  r: check  e: error  q: quit"
+            "/: search  Tab/h/l: pane  ↑↓: select  c: connect  d: disconnect  a: add  e: edit  Space: activate/cancel  D: delete  r: check  E: error  q: quit"
         }
         Mode::TargetSearch => "Type: filter  Backspace: delete  Enter: apply  Esc: cancel",
         Mode::ForwardForm => "Tab/↑↓: field  Enter: save  Esc: cancel",
         Mode::PublicBindWarning | Mode::Confirm(_) => "y/Enter: confirm  n/Esc: cancel",
-        Mode::ErrorDetails => "Esc/e/Enter: close",
+        Mode::ErrorDetails => "Esc/E/Enter: close",
     };
     let status = if ui.mode == Mode::TargetSearch {
         format!(
@@ -1104,7 +1164,11 @@ fn render_forward_form(frame: &mut Frame<'_>, area: Rect, ui: &UiState) {
         Paragraph::new(lines)
             .block(
                 Block::default()
-                    .title(" Add saved forward ")
+                    .title(if ui.editing_rule.is_some() {
+                        " Edit saved forward "
+                    } else {
+                        " Add saved forward "
+                    })
                     .borders(Borders::ALL)
                     .border_style(Style::default().fg(Color::Cyan)),
             )
@@ -1276,13 +1340,13 @@ mod tests {
     use ratatui::backend::{Backend, TestBackend};
 
     use crate::application::{AppState, ForwardRuleDraft, PortProbe, SessionManager};
-    use crate::domain::{Target, TargetId};
+    use crate::domain::{ForwardRuleId, Target, TargetId};
     use crate::runtime::RuntimeDirectory;
     use crate::ssh::{LocalForwardSpec, SshClient, SshError, SshOutput};
 
     use super::{
-        Confirmation, Focus, Mode, UiCommand, UiState, handle_key, invalidate_previous_frame,
-        render,
+        Confirmation, Focus, ForwardForm, Mode, UiCommand, UiState, handle_key,
+        invalidate_previous_frame, render,
     };
 
     #[derive(Debug, Default)]
@@ -1500,6 +1564,141 @@ mod tests {
         assert_eq!(ui.form.selected_field, 4);
         ui.form.remote_port = "3000".to_owned();
         assert_eq!(ui.form.draft().unwrap().remote_port, 3000);
+    }
+
+    #[test]
+    fn edit_form_is_prefilled_from_the_selected_rule() {
+        let fixture = Fixture::new();
+        let mut ui = UiState {
+            focus: Focus::Forwards,
+            ..UiState::default()
+        };
+
+        assert_eq!(
+            handle_key(
+                &mut ui,
+                &fixture.app,
+                KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE),
+            ),
+            UiCommand::None
+        );
+
+        assert_eq!(ui.mode, Mode::ForwardForm);
+        assert_eq!(ui.editing_rule, Some(ForwardRuleId::new("rule-00000001")));
+        assert_eq!(
+            ui.form,
+            ForwardForm {
+                selected_field: 0,
+                label: "web".to_owned(),
+                bind_address: "127.0.0.1".to_owned(),
+                local_port: "8080".to_owned(),
+                remote_host: "127.0.0.1".to_owned(),
+                remote_port: "3000".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn edit_form_render_identifies_editing_and_normal_help_shows_distinct_keys() {
+        let fixture = Fixture::new();
+        let mut ui = UiState {
+            focus: Focus::Forwards,
+            ..UiState::default()
+        };
+        let mut terminal = Terminal::new(TestBackend::new(180, 20)).unwrap();
+        terminal
+            .draw(|frame| render(frame, &ui, &fixture.app))
+            .unwrap();
+        let normal = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect::<String>();
+        assert!(normal.contains("e: edit"));
+        assert!(normal.contains("E: error"));
+
+        handle_key(
+            &mut ui,
+            &fixture.app,
+            KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE),
+        );
+        terminal
+            .draw(|frame| render(frame, &ui, &fixture.app))
+            .unwrap();
+        let editing = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect::<String>();
+        assert!(editing.contains("Edit saved forward"));
+        assert!(editing.contains("web"));
+        assert!(editing.contains("8080"));
+        assert!(editing.contains("3000"));
+    }
+
+    #[test]
+    fn edit_form_enter_updates_in_place_and_escape_cancels() {
+        let mut fixture = Fixture::new();
+        let mut ui = UiState {
+            focus: Focus::Forwards,
+            ..UiState::default()
+        };
+        handle_key(
+            &mut ui,
+            &fixture.app,
+            KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE),
+        );
+        ui.form.label = "edited".to_owned();
+        ui.form.bind_address = "::1".to_owned();
+        ui.form.local_port = "18080".to_owned();
+        ui.form.remote_host = "web.internal".to_owned();
+        ui.form.remote_port = "4000".to_owned();
+
+        let command = handle_key(
+            &mut ui,
+            &fixture.app,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        );
+        let UiCommand::UpdateForward(rule_id, draft) = command else {
+            panic!("expected an update command");
+        };
+        fixture.app.update_rule(&rule_id, draft).unwrap();
+
+        assert_eq!(ui.selected_forward, 0);
+        let edited = &fixture.app.rules_for(&TargetId::new("dev"))[0];
+        assert_eq!(edited.id, ForwardRuleId::new("rule-00000001"));
+        assert_eq!(edited.label.as_deref(), Some("edited"));
+        assert_eq!(edited.bind_address, "::1");
+        assert_eq!(edited.requested_local_port, Some(18080));
+        assert_eq!(edited.remote_host, "web.internal");
+        assert_eq!(edited.remote_port, 4000);
+
+        handle_key(
+            &mut ui,
+            &fixture.app,
+            KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE),
+        );
+        ui.form.label = "discarded".to_owned();
+        assert_eq!(
+            handle_key(
+                &mut ui,
+                &fixture.app,
+                KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+            ),
+            UiCommand::None
+        );
+        assert_eq!(ui.mode, Mode::Normal);
+        assert_eq!(ui.editing_rule, None);
+        assert_eq!(
+            fixture.app.rules_for(&TargetId::new("dev"))[0]
+                .label
+                .as_deref(),
+            Some("edited")
+        );
     }
 
     #[test]
@@ -1750,6 +1949,38 @@ mod tests {
     }
 
     #[test]
+    fn edit_uses_the_rule_from_the_filtered_target() {
+        let mut fixture = Fixture::with_aliases(&["dev-server", "PROD-DB"]);
+        let rule_id = fixture
+            .app
+            .add_rule(
+                &TargetId::new("target-1"),
+                ForwardRuleDraft::parse("database", "", "5432", "db", "5432").unwrap(),
+            )
+            .unwrap();
+        let mut ui = UiState {
+            focus: Focus::Forwards,
+            target_filter: "prod".to_owned(),
+            ..UiState::default()
+        };
+
+        assert_eq!(
+            handle_key(
+                &mut ui,
+                &fixture.app,
+                KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE),
+            ),
+            UiCommand::None
+        );
+
+        assert_eq!(ui.mode, Mode::ForwardForm);
+        assert_eq!(ui.editing_rule, Some(rule_id));
+        assert_eq!(ui.form.label, "database");
+        assert_eq!(ui.form.remote_host, "db");
+        assert_eq!(ui.form.remote_port, "5432");
+    }
+
+    #[test]
     fn cancelling_search_restores_filter_and_pre_search_target() {
         let fixture = Fixture::with_aliases(&["dev-server", "PROD-DB", "staging-dev"]);
         let mut ui = UiState {
@@ -1923,6 +2154,81 @@ mod tests {
     }
 
     #[test]
+    fn public_bind_edit_keeps_update_intent_across_warning_cancel_and_confirm() {
+        let fixture = Fixture::new();
+        let mut ui = UiState {
+            focus: Focus::Forwards,
+            ..UiState::default()
+        };
+        handle_key(
+            &mut ui,
+            &fixture.app,
+            KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE),
+        );
+        ui.form.bind_address = "0.0.0.0".to_owned();
+
+        assert_eq!(
+            handle_key(
+                &mut ui,
+                &fixture.app,
+                KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            ),
+            UiCommand::None
+        );
+        assert_eq!(ui.mode, Mode::PublicBindWarning);
+        assert_eq!(
+            handle_key(
+                &mut ui,
+                &fixture.app,
+                KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE),
+            ),
+            UiCommand::None
+        );
+        assert_eq!(ui.mode, Mode::ForwardForm);
+        assert!(ui.editing_rule.is_some());
+
+        handle_key(
+            &mut ui,
+            &fixture.app,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        );
+        let confirmed = handle_key(
+            &mut ui,
+            &fixture.app,
+            KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE),
+        );
+        assert!(matches!(confirmed, UiCommand::UpdateForward(_, _)));
+    }
+
+    #[test]
+    fn active_rule_edit_is_rejected_with_cancellation_guidance() {
+        let mut fixture = Fixture::new();
+        let rule_id = fixture.app.rules_for(&TargetId::new("dev"))[0].id.clone();
+        fixture
+            .app
+            .sessions_mut()
+            .connect(&TargetId::new("dev"))
+            .unwrap();
+        fixture.app.activate_rule(&rule_id).unwrap();
+        let mut ui = UiState {
+            focus: Focus::Forwards,
+            ..UiState::default()
+        };
+
+        assert_eq!(
+            handle_key(
+                &mut ui,
+                &fixture.app,
+                KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE),
+            ),
+            UiCommand::None
+        );
+        assert_eq!(ui.mode, Mode::Normal);
+        assert!(ui.status.contains("Space"));
+        assert!(ui.status.contains("取消してから編集"));
+    }
+
+    #[test]
     fn destructive_events_enter_confirmation_before_returning_intent() {
         let fixture = Fixture::new();
         let mut ui = UiState::default();
@@ -1950,7 +2256,7 @@ mod tests {
     fn error_detail_mode_opens_only_when_detail_exists() {
         let fixture = Fixture::new();
         let mut ui = UiState::default();
-        let key = KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE);
+        let key = KeyEvent::new(KeyCode::Char('E'), KeyModifiers::SHIFT);
 
         handle_key(&mut ui, &fixture.app, key);
         assert_eq!(ui.mode, Mode::Normal);
@@ -1958,5 +2264,19 @@ mod tests {
         ui.error_detail = Some("OpenSSH stderr".to_owned());
         handle_key(&mut ui, &fixture.app, key);
         assert_eq!(ui.mode, Mode::ErrorDetails);
+
+        handle_key(
+            &mut ui,
+            &fixture.app,
+            KeyEvent::new(KeyCode::Char('E'), KeyModifiers::SHIFT),
+        );
+        assert_eq!(ui.mode, Mode::Normal);
+
+        handle_key(
+            &mut ui,
+            &fixture.app,
+            KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE),
+        );
+        assert_eq!(ui.mode, Mode::Normal);
     }
 }

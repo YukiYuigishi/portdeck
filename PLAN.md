@@ -1,245 +1,130 @@
-# PLAN.md
+# PLAN
+
+この文書はportdeckの現在地、次の優先作業、リリース条件、将来候補を追跡する。
+安定したアプリケーション要件は[SPEC.md](SPEC.md)、開発方法は
+[AGENTS.md](AGENTS.md)、個別作業の経緯と検証結果は[issues/](issues/)を正とする。
+完了した実装の詳細はresolved issueとGit履歴に残し、ここでは繰り返さない。
 
 ## Current Status
 
-portdeck 0.1.0のMVP実装を完了。OpenSSH 9.6p1を使った隔離sshd統合テストで、ControlMaster、Local転送、direct／ProxyJumpのSOCKS5転送、実TCP通信、個別取消、終了を確認済み。
+Linux向けportdeck 0.1.0のMVP機能は実装済みであり、release hardeningの段階にある。
 
-Phase 9のうち、複数OpenSSHバージョンと実接続先を使う認証・ProxyJump・ホスト鍵の互換性マトリクスは継続課題として残す。これは現在のMVP実装範囲を広げるものではない。
+- `~/.ssh/config`と再帰的な`Include`から具体的なtargetを検出する。
+- targetごとにportdeck専用のOpenSSH ControlMasterを開始、確認、終了する。
+- Local (`ssh -L`)とSOCKS (`ssh -D`)の転送ルールを保存、編集、追加、取消する。
+- 保存済みの定義とControlMaster上の実行状態を分離し、起動時に残存socketを確認する。
+- TUIでtarget検索、Vim風pane移動、エラー詳細、接続後の安全な復帰を提供する。
+- `--diagnose`と所有者限定のfile-backed `--debug` logを提供する。
 
-MVPは、Linux上でシステムOpenSSHのControlMasterを管理し、TUIから `-L` ローカルポートフォワードを追加・削除できる状態を指す。
+次の個別作業は完了している。
 
-## Development Policy
+- [Issue 001: 接続後のTUI復帰](issues/001-tui-does-not-resume-after-connect.md)
+- [Issue 002: targetのHost alias検索](issues/002-filter-targets-by-host-alias.md)
+- [Issue 003: 保存済みforward ruleの編集](issues/003-edit-saved-forward-rules.md)
+- [Issue 004: Local／SOCKS forwardの選択](issues/004-select-local-or-socks-forward.md)
+- [Issue 005: `h`／`l`によるpane移動](issues/005-use-h-and-l-for-pane-navigation.md)
+- [Issue 006: file-backed DEBUG mode](issues/006-add-file-backed-debug-mode.md)
 
-- 各フェーズは、完了条件を満たしてから次へ進む。
-- 最初にOpenSSH制御部分をCLIまたはテストから検証し、TUIはその後に載せる。
-- ユーザーの実SSH環境に依存するテストと、偽 `ssh` を使う再現可能なテストを分ける。
-- MVP完了までMosh、リモートポート自動検出、`-R`、TLS処理へ範囲を広げない。MVP完了後の利用要求を受け、OpenSSH `-D`は追加済み。
+### Verified baseline
 
-## Development Commands
+- OpenSSH 9.6p1を使用する隔離sshd環境でControlMaster lifecycleを確認済み。
+- direct接続とProxyJump接続でLocal／SOCKS forwardingと実TCP通信を確認済み。
+- SOCKS5 handshake、forward取消後のlistener閉鎖、ControlMaster終了を確認済み。
+- 隔離sshdの公開鍵認証では、ユーザーのSSH設定、鍵、`known_hosts`を変更しない。
+- unit、adapter、TUI buffer、CLI、DEBUG、隔離sshd integration testを整備済み。
 
-- Lint: `./scripts/lint.sh`
-- Test: `cargo test --all-targets --all-features`
-- Install Git hooks: `./scripts/install-git-hooks.sh`
+ProxyJumpは実装・隔離検証とも完了しており、release gateには残さない。
+最低対応OpenSSH versionと対話的な認証・host keyの互換性は未確定である。
 
-`pre-commit` hookとGitHub Actionsでも同じlintスクリプトを実行する。
+## 0.1.0 Release Gates
 
-## Phase 0: Requirements and Design Baseline
+以下は0.1.0のrelease判断前に、再現手順と結果をissueへ記録する。
+要件を変更して延期する場合は、理由と利用者への影響を明記する。
 
-- [x] プロダクトの目的を定義する。
-- [x] OpenSSHとTUIの責務を分離する。
-- [x] ControlMasterを使用する方針を定義する。
-- [x] MVPと将来機能を分離する。
-- [x] セキュリティ要件と非目標を定義する。
-- [x] プロジェクト名とバイナリ名を決定する（`portdeck`）。
-- [ ] 対象とする最低OpenSSHバージョンを実機で確認する。
+### OpenSSH compatibility
 
-### Exit Criteria
+- [ ] 最低対応OpenSSH versionの候補を決め、必要なControlMaster操作を実機で確認する。
+- [ ] Linux上の複数OpenSSH versionでdiagnose、connect、check、forward、cancel、exitを確認する。
+- [ ] version固有の制約を[SPEC.md](SPEC.md)とユーザー文書へ反映する。
 
-- `AGENTS.md` と `PLAN.md` がレビュー可能な状態で存在する。
-- MVPの範囲が「SSH接続と `-L` 管理」に限定されている。
+### Authentication interaction
 
-## Phase 1: Project Bootstrap
+隔離sshdの鍵ファイルを直接指定する公開鍵認証は検証済みである。次を追加で確認する。
 
-- [x] Rustプロジェクトを初期化する。
-- [x] formatter、lint、testの基本コマンドを決める。
-- [x] `domain`、`ssh`、`config`、`runtime`、`tui` のモジュール境界を作る。
-- [x] 構造化ログとエラー型の最小構成を作る。
-- [x] CIでformat、lint、unit testを実行する。
+- [ ] `ssh-agent`に登録した鍵で接続でき、portdeckが鍵素材を取得しないことを確認する。
+- [ ] 鍵のpassphrase入力中にTUIを安全にsuspendし、接続後に復帰することを確認する。
+- [ ] keyboard-interactive認証の端末引渡し、成功、取消、失敗を確認する。
 
-### Exit Criteria
+### Host key interaction
 
-- 空のTUIまたは最小CLIが起動する。
-- `cargo fmt --check`、`cargo clippy`、`cargo test` が成功する。
-- UIコードから直接 `ssh` を起動しない構造になっている。
+- [ ] 初回host key確認をOpenSSHへ引き渡し、応答後にTUIへ復帰することを確認する。
+- [ ] host key不一致を緩和せず、失敗状態とOpenSSHの診断を表示することを確認する。
+- [ ] テストでは隔離した`known_hosts`だけを使用する。
 
-## Phase 2: OpenSSH Capability Probe
+### Forwarding refusal
 
-実装を広げる前に、実際のOpenSSHで必要な操作が成立することを小さな検証コードまたは統合テストで確認する。
+- [ ] sshdがTCP forwardingを禁止した環境でLocal forwardの失敗を確認する。
+- [ ] 同じ環境でSOCKS forwardの失敗を確認する。
+- [ ] 失敗したforwardが`Active`にならず、再操作可能であることを確認する。
 
-- [x] `ssh` 実行ファイルを検出する。
-- [x] `ssh -V` の取得と診断表示を実装する。
-- [x] 専用ControlPathでmasterを開始する。
-- [x] `-O check` でmasterを確認する。
-- [x] `-O forward -L ...` で転送を追加する。
-- [x] `-O cancel -L ...` で転送を削除する。
-- [x] `-O exit` でmasterを終了する。
-- [x] 認証が必要な場合のTUI suspend/resume方針を実装し、PTY上でTUIの停止・復元境界を検証する。
-- [x] OpenSSH stderrと終了コードを記録し、失敗パターンを整理する。
+## Next
 
-### Exit Criteria
+1. Release gateごとに独立したissueを作り、再現環境と対象OpenSSH versionを定義する。
+2. 最低version候補と最新の利用可能versionでOpenSSH compatibility matrixを実行する。
+3. 認証とhost keyのPTY testを、ユーザー環境から隔離して実行する。
+4. forwarding拒否用の隔離sshd設定を追加し、Local／SOCKS双方を確認する。
+5. 結果を仕様と日英ユーザー文書へ反映し、0.1.0 release readinessを再評価する。
 
-- 1本のControlMasterに対して複数のローカル転送を追加・削除できる。
-- 転送先のテストTCPサーバーへ実際に通信できる。
-- 接続・転送の失敗を終了コードから検出できる。
-- 検証終了後にmasterと転送が残らない。
-
-## Phase 3: Domain and Command Adapter
-
-- [x] `Target`、`Session`、`ForwardRule`、`ActiveForward` を定義する。
-- [x] セッション状態遷移を実装する。
-- [x] 転送状態遷移を実装する。
-- [x] OpenSSH実行結果を表す型を定義する。
-- [x] argvベースのコマンドビルダーを実装する。
-- [x] `connect`、`check`、`add_local_forward`、`cancel_local_forward`、`disconnect` を実装する。
-- [x] 外部コマンド実行部分をテスト用に差し替え可能にする。
-- [x] 偽 `ssh` によるadapter testを追加する。
-
-### Exit Criteria
-
-- シェルを介さず、すべてのSSH操作を実行できる。
-- 成功、失敗、stderrが型付きの結果として上位層へ返る。
-- 状態遷移とコマンド引数にunit testがある。
-
-## Phase 4: SSH Target Discovery
-
-- [x] `~/.ssh/config` の具体的なHostエイリアスを列挙する。
-- [x] `Include` を再帰的に処理する。
-- [x] include循環と重複を安全に処理する。
-- [x] ワイルドカードと否定パターンを候補一覧から除外する。
-- [x] `ssh -G <alias>` から表示用の有効設定を取得する。
-- [x] 設定ファイルが存在しない場合を正常系として扱う。
-- [x] 不正なHostエイリアスをコマンドへ渡さない入力検証を追加する。
-
-### Exit Criteria
-
-- 一般的な `~/.ssh/config` から接続候補を一覧化できる。
-- ProxyJump等の意味解釈を独自実装せずOpenSSHへ委譲している。
-- ユーザーのSSH設定を変更しない。
-
-## Phase 5: Runtime and Control Socket Lifecycle
-
-- [x] XDG runtime directoryを解決する。
-- [x] 所有者限定のランタイムディレクトリを作成する。
-- [x] 接続先ごとの短く安定したControlPathを生成する。
-- [x] セッション開始と `-O check` による状態更新を実装する。
-- [x] セッション終了処理を実装する。
-- [x] 正常終了時に全専用masterを終了する。
-- [x] 前回異常終了で残ったcontrol socketを検出する。
-- [x] 生存masterと単なるstale socketを区別して回収する。
-- [x] 他ツールのControlPathを触らないことをテストする。
-
-### Exit Criteria
-
-- 複数接続先のControlMasterを衝突なく管理できる。
-- 接続状態がPIDではなく `-O check` から再構築される。
-- 正常終了後に本ツール所有のmasterが残らない。
-
-## Phase 6: Local Forward Management
-
-- [x] 転送入力値を検証する。
-- [x] 既定値 `127.0.0.1:<remote-port>` を実装する。
-- [x] IPv4、ホスト名、IPv6を正しく正規化する。
-- [x] 希望ローカルポートへの転送追加を実装する。
-- [x] ポート競合時の限定的な候補探索を実装する。
-- [x] 実際に確保したローカルポートを状態へ保存する。
-- [x] 正確な転送指定による取消を実装する。
-- [x] セッション切断時に配下の転送状態を更新する。
-- [x] `0.0.0.0`、`::`、`*` bind時の警告情報を実装する。
-
-### Exit Criteria
-
-- 同一セッションへ複数転送を追加・削除できる。
-- ローカルポート競合時に別の利用可能なポートへフォールバックできる。
-- OpenSSHが拒否した転送を `Active` と表示しない。
-- 取消失敗をユーザーへ通知できる。
-
-## Phase 7: MVP TUI
-
-- [x] アプリケーションイベントループを実装する。
-- [x] 接続先・セッション一覧ペインを実装する。
-- [x] 転送一覧ペインを実装する。
-- [x] 接続・切断操作を実装する。
-- [x] 転送追加フォームを実装する。
-- [x] 転送削除と確認表示を実装する。
-- [x] ステータス行とキーヘルプを実装する。
-- [x] OpenSSH stderrの詳細表示を実装する。
-- [x] TUIからOpenSSH認証画面へのsuspend/resumeを実装する。
-- [x] 小さい端末サイズの表示を実装する。
-- [x] 色以外の状態表現を追加する。
-
-### Exit Criteria
-
-- ユーザーがマウスなしで主要操作を完了できる。
-- 接続先、接続状態、ローカル待受、リモート宛先を一画面で把握できる。
-- 認証やホスト鍵確認をOpenSSHへ安全に引き渡せる。
-- 失敗後もTUIが壊れず、再操作できる。
-
-## Phase 8: Persistence and Recovery
-
-- [x] 本ツール固有設定の保存形式を確定する（TOML schema version 1）。
-- [x] ラベルと接続先に属する転送ルール定義を保存する。
-- [x] atomic writeを実装する。
-- [x] 壊れた設定ファイルの診断と安全な失敗を実装する。
-- [x] 実行状態と保存済み定義を分離する。
-- [x] 異常終了後の起動時リカバリー画面または処理を実装する。
-- [x] 認証情報が保存対象に入らないことを確認する。
-
-### Exit Criteria
-
-- 再起動後も保存済み転送ルールを確認できる。
-- 実際には切断済みのセッションを接続中と誤表示しない。
-- 設定書込み中の異常終了で既存設定を失いにくい。
-
-## Phase 9: Hardening and Release Readiness
-
-- [ ] Linux上の複数OpenSSHバージョンで動作確認する。
-- [ ] ProxyJumpを使う接続先で確認する。
-- [ ] 公開鍵、ssh-agent、パスフレーズ、keyboard-interactive認証で確認する。
-- [ ] ホスト鍵初回確認とホスト鍵不一致を確認する。
-- [ ] サーバー側でTCP forwardingが禁止された場合を確認する。
-- [x] 長いHostエイリアスでもControlPath長制限を超えないことを確認する。
-- [x] SIGINT、SIGTERM、端末切断相当のSIGHUPで端末復元と正常終了を確認する。
-- [x] READMEへ導入方法、権限、安全上の注意を書く。
-- [x] MVP acceptance criteriaをunit、adapter、TUI buffer、隔離sshd統合テストで確認する。
-
-### Exit Criteria
-
-- 主要認証方式で秘密情報を本ツールが取得しない。
-- 終了と異常系で不要なmasterを極力残さない。
-- 初めて使うユーザーがREADMEだけで接続と転送を作成できる。
+未完了gateの実施中に設計変更が必要になった場合は、実装前にissueを更新する。
+security boundary、永続形式、module責務などの重要な判断を変える場合はADRも作成する。
 
 ## Post-MVP Backlog
 
-MVP完了後、利用上の必要性を確認して着手する。
+以下は0.1.0 MVPのrelease gateではない。利用要求と優先度を確認してからissue化する。
 
 ### Remote Port Discovery
 
-- [ ] ControlMaster経由で `ss -H -ltn` を実行する。
-- [ ] listen addressとportを解析する。
-- [ ] 権限がある場合だけプロセス情報を表示する。
-- [ ] 検出ポートから転送を追加する導線を作る。
-- [ ] 定期更新と手動更新の負荷を評価する。
+- [ ] 既存ControlMaster経由で`ss -H -ltn`を実行し、listen addressとportを表示する。
+- [ ] 検出したportからforward追加へ進む導線を設計する。
+- [ ] 手動／定期更新、port消失、権限不足の表示を決める。
 
-### Protocol-aware Convenience
+### Protocol Hints
 
-- [ ] `tcp`、`http`、`https` の表示用ヒントを追加する。
-- [ ] HTTP/HTTPS URLをコピーできるようにする。
-- [ ] ブラウザ起動を追加する場合は明示操作に限定する。
-- [ ] TLSを終端・変換しないことをUIと文書で明記する。
+- [ ] `tcp`、`http`、`https`の表示用hintをforward ruleへ追加する。
+- [ ] 明示操作によるURL copyやbrowser起動を検討する。
+- [ ] TCP forwarding自体はHTTP解析やTLS終端を行わない方針を維持する。
 
 ### Session Profiles
 
-- [ ] 接続時に有効化する転送セットを定義できるようにする。
-- [ ] 自動接続・自動転送を明示的な設定として追加する。
-- [ ] TUI終了後も維持するdetach機能の要否を検討する。
+- [ ] 接続時に有効化するforward setを明示的に定義できるようにする。
+- [ ] opt-inの自動接続／自動有効化を設計する。
+- [ ] TUI終了後もControlMasterを維持するdetach機能の要否を検討する。
 
 ### Mosh
 
-- [ ] Moshで解決したい利用場面を整理する。
-- [ ] SSH接続先定義を再利用する。
-- [ ] Moshセッションの起動・終了・表示を追加する。
-- [ ] Moshがポート転送を提供しないことを能力モデルへ反映する。
+- [ ] 対象となる利用場面と、SSH session／forwardingとの能力差を整理する。
+- [ ] SSH target定義の再利用範囲を決める。
+- [ ] Moshがport forwardingを提供しないことをUIと状態modelへ反映する。
 
 ### Additional SSH Forward Types
 
-- [ ] 利用要求が確認できた場合に限り `-R` を検討する。
-- [x] 利用要求に基づき、OpenSSH `-D`によるSOCKS転送を追加する。
-- [x] Local／SOCKSそれぞれの外部公開警告を実装する。
+- [ ] 利用要求が確認できた場合に限りremote forwarding (`ssh -R`)を検討する。
+- OpenSSH dynamic forwarding (`ssh -D`)はIssue 004で実装済み。
 
 ## Deferred Decisions
 
-- 最低OpenSSHバージョン
-- macOS正式対応の時期
-- TUI終了後もセッションを残すdetach機能
-- リモートポート監視の更新間隔
-- Moshを同一バイナリへ含めるか別機能にするか
+- 最低対応OpenSSH version
+- macOSを正式な対応対象へ含める時期と検証範囲
+- TUI終了後もsessionを残すdetach機能
+- remote port discoveryの更新方式と間隔
+- Moshを同じbinaryへ含めるか、独立した機能として提供するか
+- remote forwarding (`ssh -R`)を製品scopeへ含めるか
+
+## Architecture Decision Records
+
+現在の主要な判断は[docs/adr/](docs/adr/)に記録する。
+
+- [ADR-0001: システムOpenSSHへSSH処理を委譲する](docs/adr/0001-delegate-ssh-to-system-openssh.md)
+- [ADR-0002: targetごとに専用ControlMasterを使用する](docs/adr/0002-use-dedicated-controlmaster-per-target.md)
+- [ADR-0003: 保存済み定義と実行状態を分離する](docs/adr/0003-separate-saved-rules-from-runtime-state.md)
+- [ADR-0004: SOCKS forwardingをOpenSSH `-D`へ委譲する](docs/adr/0004-use-openssh-dynamic-forwarding-for-socks.md)

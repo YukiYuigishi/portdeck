@@ -252,8 +252,11 @@ $HOME/.config/portdeck/config.toml
   次回の定義変更による保存時にkindを明示して書き戻す。
 - 現在のSSH設定から検出できないtarget sectionも検証後に保持し、既知targetの
   変更によって無関係な保存済み定義を失わない。
-- unknown field、重複target、重複rule ID、unsupported schema、不正値は
-  診断付きで拒否する。既存fileをparseできない場合は上書きしない。
+- unknown field、重複target、unsupported schema、不正値は診断付きで拒否する。
+  現在検出できる既知targetからloadするruleについては、targetをまたぐ重複
+  rule IDも拒否する。未知target sectionは各ruleの値を検証して保持するが、
+  そのrule IDは既知targetをloadする際の重複判定には含めない。既存fileを
+  parseできない場合は上書きしない。
 - 更新は同一directory内の一時fileへ書き、file sync、atomic rename、parent
   directory syncを行う。永続化失敗時はmemory上のmutationをrollbackする。
 
@@ -565,7 +568,7 @@ shell展開が起きず入力が単一引数として渡ることを再現可能
 
 ### Integration tests
 
-- 隔離した一時HOME、専用key、専用known_hosts、local test sshdを使用する。
+- 隔離したclient設定、専用key、専用known_hosts、local test sshdを使用する。
 - ControlMaster start/check、Local転送の実TCP通信とcancel、direct SOCKS5の
   handshake／実TCP通信／cancel、ProxyJump経由のControlMasterとSOCKS5通信、
   session exitを確認する。
@@ -575,9 +578,10 @@ shell展開が起きず入力が単一引数として渡ることを再現可能
 
 ### Project checks
 
-`./scripts/lint.sh`をformat、clippy、testの共通入口とし、Git hookとCIでも
-同じcheckを使用する。振る舞いを変える変更は対応するtestと、必要な仕様・
-ユーザー文書を同時に更新する。
+`./scripts/lint.sh`は`cargo fmt --check`と全target／全featureのclippyを実行する。
+通常testは`cargo test --all-targets --all-features`で実行する。pre-commit hookは
+lint scriptを呼び、CIはlint scriptと通常testを別stepで実行する。振る舞いを
+変える変更は対応するtestと、必要な仕様・ユーザー文書を同時に更新する。
 
 ## Current Acceptance Criteria
 

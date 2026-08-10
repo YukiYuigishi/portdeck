@@ -2,7 +2,7 @@
 
 # portdeck
 
-portdeckは、システムのOpenSSH接続とLocal／SOCKS転送を一画面で管理するLinux向けTUIです。`~/.ssh/config`から接続先を選び、専用ControlMasterの開始・確認・終了と、転送ルールの保存・有効化・取消を操作できます。
+portdeckは、Linuxおよび検証済みmacOS baseline上で、システムのOpenSSH接続とLocal／SOCKS転送を一画面で管理するTUIです。`~/.ssh/config`から接続先を選び、専用ControlMasterの開始・確認・終了と、転送ルールの保存・有効化・取消を操作できます。
 
 SSHプロトコル、認証、暗号化、ホスト鍵確認、ProxyJump、TCP中継はOpenSSHへ委譲します。portdeckは汎用ターミナル、SSH鍵管理ツール、独自プロキシではありません。
 
@@ -17,12 +17,12 @@ SSHプロトコル、認証、暗号化、ホスト鍵確認、ProxyJump、TCP�
 
 ## 必要な環境
 
-- Linux
+- Linux、または下記の検証済みmacOS baseline
 - PATHから実行できるOpenSSH Clientの`ssh`
 - Rust stable（ソースからインストールする場合）
 - 具体的な`Host`エイリアスを含む`~/.ssh/config`（接続先を表示する場合）
 
-MVPはOpenSSH 9.6p1で実通信を含めて検証しています。これより古いバージョンの最低保証値はまだ確定していません。macOSとWindowsは現在のサポート対象外です。
+MVPはLinux上のOpenSSH 9.6p1と、macOS 26.5 arm64上のシステムOpenSSH 10.2p1で実通信を含めて検証しています。最低対応OpenSSH versionと、他のmacOS versionおよびmacOS x86_64における互換性はまだ確定していません。Windows nativeは現在のサポート対象外です。
 
 ## インストール
 

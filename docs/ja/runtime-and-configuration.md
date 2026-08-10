@@ -62,13 +62,15 @@ ControlPathは次のportdeck専用ディレクトリへ置きます。
 $XDG_RUNTIME_DIR/portdeck/
 # XDG_RUNTIME_DIRが未設定の場合:
 <OSのtemporary directory>/portdeck-<uid>/
+# 上記では安全なControlPath長を確保できない場合:
+/tmp/portdeck-<uid>/
 ```
 
-fallbackには`std::env::temp_dir()`が選ぶtemporary directoryを使います。Linuxでは通常`/tmp`ですが、環境によって異なる場合があります。
+fallbackには`std::env::temp_dir()`が選ぶtemporary directoryを使います。Linuxでは通常`/tmp`ですが、環境によって異なる場合があります。そこから作るControlPathが長すぎる場合は、owner検証を行う短いfallback `/tmp/portdeck-<uid>`を使います。明示された`XDG_RUNTIME_DIR`を別pathへ暗黙に置き換えることはなく、ControlPathが長すぎる場合はerrorにします。
 
 `XDG_RUNTIME_DIR`を設定する場合は絶対パスである必要があります。runtimeディレクトリは実ディレクトリかつ現在のユーザー所有であることを確認し、mode `0700`に制限します。他ユーザー所有のパスやsymlinkなど安全に利用できないパスは拒否します。
 
-Unix domain socketのパス長制限を避けるため、ControlPathは短い固定名と接続先IDの固定長ハッシュから作ります。Hostエイリアスをsocket名へ直接埋め込みません。portdeckは他ツールやユーザーが作成したControlMasterを採用しません。
+Unix domain socketのパス長制限を避けるため、ControlPathは短い固定名と接続先IDの固定長ハッシュから作ります。Hostエイリアスをsocket名へ直接埋め込みません。OpenSSHがsocket作成時に使用する17 byteの一時suffixを確保し、合計を保守的な100 byte以内にするため、OpenSSHへ渡すControlPathを最大83 byteに制限します。portdeckは他ツールやユーザーが作成したControlMasterを採用しません。
 
 有効な転送の状態と実際のローカルポートは、現在のportdeckプロセスがメモリ上で管理します。接続状態はPIDの有無ではなく、専用ControlPathに対する`ssh -O check`の結果で判断します。
 

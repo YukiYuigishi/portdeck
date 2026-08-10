@@ -10,7 +10,7 @@
 
 portdeckは、リモート開発時にOpenSSHの接続とポートフォワードを組み立て、
 複数のSSHプロセス、ローカル待受port、リモート宛先を人手で追跡する負担を
-減らすLinux向けTUIである。
+減らすLinuxおよび検証済みmacOS向けTUIである。
 
 ユーザーは`~/.ssh/config`の接続先を選び、次の操作をTUI内で完結できる。
 
@@ -61,13 +61,16 @@ OpenSSHの既存能力を安全に操作し、定義状態と実行状態を分�
 ## Supported Environment
 
 - 第一対象はLinux clientである。
+- macOSは、macOS 26.5 arm64とシステムOpenSSH 10.2p1の組み合わせを
+  検証済みbaselineとして対応する。他のmacOS versionとmacOS x86_64は
+  未検証である。
 - `PATH`から実行できるシステムOpenSSH Clientの`ssh`を必要とする。
 - リモート側は標準的なOpenSSH Serverを前提とし、専用agentやdaemonを
   要求しない。
-- 実通信を含む現在の統合テスト実績はOpenSSH 9.6p1であり、最低対応
-  OpenSSH versionは未確定である。
-- macOSはUnix domain socketとOpenSSHの挙動を検証するまでサポート外、
-  Windows nativeはControlMaster、terminal制御、path設計を行うまで
+- 実通信を含む現在の統合テスト実績はLinux上のOpenSSH 9.6p1、および
+  macOS 26.5 arm64上のOpenSSH 10.2p1である。最低対応OpenSSH versionは
+  未確定である。
+- Windows nativeはControlMaster、terminal制御、path設計を行うまで
   サポート外とする。
 
 未完了の互換性検証は[PLAN](PLAN.md)のrelease gatesで管理する。
@@ -276,13 +279,19 @@ ControlMaster socketは次の専用directoryへ置く。
 $XDG_RUNTIME_DIR/portdeck/
 # XDG_RUNTIME_DIR未設定時
 <std::env::temp_dir()>/portdeck-<uid>/
+# 上記ではControlPathが長すぎる場合
+/tmp/portdeck-<uid>/
 ```
 
 - runtime directoryはabsolute path、current user所有の実directoryでなければ
   ならず、symlinkは拒否する。modeを`0700`に制限する。
+- 明示された`XDG_RUNTIME_DIR`は別pathへ置き換えない。そこから作るControlPathが
+  長すぎる場合は明確なerrorとする。
 - ControlPath名はtarget IDのSHA-256 digestの一部から作る固定長名であり、
   Host aliasをそのまま含めない。
-- Unix domain socketのpath長に対して保守的な100 byte上限を検査する。
+- Unix domain socketのpath長はOpenSSHがsocket作成時に付ける17 byteの一時suffixを
+  含めて保守的な100 byte以内とする。このためportdeckが渡すControlPathは
+  最大83 byteとする。
 - `cm-` namespaceに一致するportdeck専用entryだけを列挙・回収対象にする。
 
 起動時回収では、現在のtargetへ対応する既知socketを`-O check`する。生存中なら

@@ -28,7 +28,7 @@ Linux向けportdeck 0.1.0のMVP機能は実装済みであり、release hardenin
 ### Verified baseline
 
 - OpenSSH 9.6p1を使用する隔離sshd環境でControlMaster lifecycleを確認済み。
-- direct接続とProxyJump接続でLocal／SOCKS forwardingと実TCP通信を確認済み。
+- direct接続でLocal forwarding、direct／ProxyJump接続でSOCKS5 forwardingの実TCP通信を確認済み。
 - SOCKS5 handshake、forward取消後のlistener閉鎖、ControlMaster終了を確認済み。
 - 隔離sshdの公開鍵認証では、ユーザーのSSH設定、鍵、`known_hosts`を変更しない。
 - unit、adapter、TUI buffer、CLI、DEBUG、隔離sshd integration testを整備済み。

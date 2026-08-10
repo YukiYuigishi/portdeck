@@ -513,7 +513,7 @@ fn atomic_write(path: &Path, contents: &[u8]) -> Result<(), StoreError> {
 mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     use crate::domain::{ForwardKind, ForwardRule, ForwardRuleId, Target, TargetId};
 
@@ -521,12 +521,11 @@ mod tests {
 
     struct TestDirectory(PathBuf);
 
+    static NEXT_TEST_DIRECTORY_ID: AtomicU64 = AtomicU64::new(0);
+
     impl TestDirectory {
         fn new() -> Self {
-            let unique = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos();
+            let unique = NEXT_TEST_DIRECTORY_ID.fetch_add(1, Ordering::Relaxed);
             let path = std::env::temp_dir().join(format!(
                 "portdeck-store-test-{}-{unique}",
                 std::process::id()

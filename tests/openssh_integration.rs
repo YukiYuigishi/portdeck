@@ -6,8 +6,9 @@ use std::net::{TcpListener, TcpStream};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use portdeck::domain::TargetId;
 use portdeck::runtime::RuntimeDirectory;
@@ -19,17 +20,16 @@ struct SshdFixture {
     child: Child,
 }
 
+static NEXT_FIXTURE_ID: AtomicU64 = AtomicU64::new(0);
+
 impl SshdFixture {
     fn start() -> Self {
         for executable in ["/usr/bin/ssh", "/usr/bin/ssh-keygen", "/usr/sbin/sshd"] {
             assert!(Path::new(executable).is_file(), "missing {executable}");
         }
 
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let directory = std::env::temp_dir().join(format!("pd-it-{}-{unique}", std::process::id()));
+        let unique = NEXT_FIXTURE_ID.fetch_add(1, Ordering::Relaxed);
+        let directory = Path::new("/tmp").join(format!("i{:x}{unique:x}", std::process::id()));
         fs::create_dir(&directory).unwrap();
 
         let host_key = directory.join("ssh_host_ed25519_key");
@@ -240,7 +240,7 @@ fn assert_listener_closes(port: u16) {
 fn dynamic_forward_traffic_cancel_and_exit(host_alias: &str) {
     let fixture = SshdFixture::start();
     let ssh = OpenSsh::new(&fixture.client_executable);
-    let runtime = RuntimeDirectory::prepare(fixture.directory.join("runtime")).unwrap();
+    let runtime = RuntimeDirectory::prepare(fixture.directory.join("r")).unwrap();
     let control_path = runtime.control_path(&TargetId::new(host_alias)).unwrap();
     let destination_listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
     let destination_port = destination_listener.local_addr().unwrap().port();
@@ -279,7 +279,7 @@ fn dynamic_forward_traffic_cancel_and_exit(host_alias: &str) {
 fn controlmaster_forward_traffic_cancel_and_exit() {
     let fixture = SshdFixture::start();
     let ssh = OpenSsh::new(&fixture.client_executable);
-    let runtime = RuntimeDirectory::prepare(fixture.directory.join("runtime")).unwrap();
+    let runtime = RuntimeDirectory::prepare(fixture.directory.join("r")).unwrap();
     let control_path = runtime
         .control_path(&TargetId::new("integration-target"))
         .unwrap();
@@ -348,7 +348,7 @@ fn controlmaster_forward_traffic_cancel_and_exit() {
 fn proxyjump_controlmaster_returns_checks_and_exits() {
     let fixture = SshdFixture::start();
     let ssh = OpenSsh::new(&fixture.client_executable);
-    let runtime = RuntimeDirectory::prepare(fixture.directory.join("runtime")).unwrap();
+    let runtime = RuntimeDirectory::prepare(fixture.directory.join("r")).unwrap();
     let control_path = runtime
         .control_path(&TargetId::new("integration-target-via-jump"))
         .unwrap();

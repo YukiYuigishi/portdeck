@@ -2,8 +2,9 @@
 
 English | [日本語](README.ja.md)
 
-portdeck is a Linux TUI for managing OpenSSH connections and Local or SOCKS
-forwards. Select a target from `~/.ssh/config`, manage a dedicated
+portdeck is a TUI for managing OpenSSH connections and Local or SOCKS forwards
+on Linux and the verified macOS baseline. Select a target from
+`~/.ssh/config`, manage a dedicated
 ControlMaster, and save, activate, or cancel `ssh -L` and `ssh -D` forwards
 from one screen.
 
@@ -23,14 +24,15 @@ terminal emulator, an SSH key manager, or a custom proxy implementation.
 
 ## Requirements
 
-- Linux
+- Linux, or the verified macOS baseline described below
 - An OpenSSH client with `ssh` available on `PATH`
 - Rust stable when installing from source
 - A `~/.ssh/config` containing concrete `Host` aliases to display targets
 
-The MVP has been tested with real traffic on OpenSSH 9.6p1. Its minimum
-supported OpenSSH version has not been established. macOS and Windows are not
-currently supported.
+The MVP has been tested with real traffic on OpenSSH 9.6p1 on Linux and the
+system OpenSSH 10.2p1 on macOS 26.5 arm64. Its minimum supported OpenSSH
+version and compatibility with other macOS versions or macOS x86_64 have not
+been established. Native Windows is not currently supported.
 
 ## Install and run
 

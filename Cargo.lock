@@ -530,6 +530,7 @@ dependencies = [
  "crossterm",
  "glob",
  "ratatui",
+ "rustix",
  "serde",
  "sha2",
  "signal-hook",

@@ -63,19 +63,25 @@ ControlMaster sockets are stored in:
 $XDG_RUNTIME_DIR/portdeck/
 # When XDG_RUNTIME_DIR is unset:
 <OS temporary directory>/portdeck-<uid>/
+# When that path cannot fit a safe ControlPath:
+/tmp/portdeck-<uid>/
 ```
 
 The fallback uses the temporary directory selected by `std::env::temp_dir()`.
 On Linux this is normally `/tmp`, but it may differ according to the
-environment.
+environment. If the resulting ControlPath would be too long, portdeck uses the
+short, owner-validated fallback `/tmp/portdeck-<uid>` instead. An explicitly
+set `XDG_RUNTIME_DIR` is never silently replaced; a ControlPath that is still
+too long produces an error.
 
 The runtime directory must be absolute, owned by the current user, and a real
 directory rather than a symlink. portdeck restricts it to mode `0700`.
 
 Each target receives a short, stable ControlPath name derived from its internal
 target ID. The `Host` alias itself is not embedded in the socket name. portdeck
-also checks the resulting Unix-domain socket path against a conservative path
-length limit.
+limits the ControlPath passed to OpenSSH to 83 bytes. This leaves 17 bytes for
+the temporary suffix OpenSSH uses while creating the socket and keeps their
+combined length within a conservative 100-byte Unix-domain socket budget.
 
 The dedicated master starts with `ClearAllForwardings=yes`, so forwards from
 the user's SSH configuration are not silently mixed into portdeck's tracked

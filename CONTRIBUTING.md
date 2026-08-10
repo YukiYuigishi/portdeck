@@ -4,13 +4,15 @@ Thank you for contributing to portdeck. Keep changes focused, and update tests a
 
 ## Prerequisites
 
-Development currently targets Linux. Install:
+Development primarily targets Linux, with macOS 26.5 arm64 as an additional
+verified baseline. Install:
 
 - Git
 - the stable Rust toolchain, including `rustfmt` and Clippy
 - OpenSSH Client (`ssh`)
 
-The ignored integration tests also require these executables at their standard Linux paths:
+The ignored integration tests also require these executables at the standard
+paths used by the supported test hosts:
 
 - `/usr/bin/ssh`
 - `/usr/bin/ssh-keygen`
@@ -44,7 +46,8 @@ GitHub Actions runs both commands for pushes and pull requests.
 
 ## OpenSSH integration tests
 
-The real-OpenSSH tests are ignored by default. Run them explicitly on a compatible Linux system:
+The real-OpenSSH tests are ignored by default. Run them explicitly on a
+compatible Linux or macOS system:
 
 ```console
 cargo test --test openssh_integration -- --ignored --test-threads=1 --nocapture

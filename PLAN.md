@@ -7,7 +7,8 @@
 
 ## Current Status
 
-Linux向けportdeck 0.1.0のMVP機能は実装済みであり、release hardeningの段階にある。
+Linuxを第一対象とするportdeck 0.1.0のMVP機能は実装済みであり、release
+hardeningの段階にある。macOSは検証済みの単一baselineを対応対象に含める。
 
 - `~/.ssh/config`と再帰的な`Include`から具体的なtargetを検出する。
 - targetごとにportdeck専用のOpenSSH ControlMasterを開始、確認、終了する。
@@ -24,6 +25,7 @@ Linux向けportdeck 0.1.0のMVP機能は実装済みであり、release hardenin
 - [Issue 004: Local／SOCKS forwardの選択](issues/004-select-local-or-socks-forward.md)
 - [Issue 005: `h`／`l`によるpane移動](issues/005-use-h-and-l-for-pane-navigation.md)
 - [Issue 006: file-backed DEBUG mode](issues/006-add-file-backed-debug-mode.md)
+- [Issue 008: macOS起動互換性](issues/008-verify-macos-startup-compatibility.md)
 
 ### Verified baseline
 
@@ -32,9 +34,14 @@ Linux向けportdeck 0.1.0のMVP機能は実装済みであり、release hardenin
 - SOCKS5 handshake、forward取消後のlistener閉鎖、ControlMaster終了を確認済み。
 - 隔離sshdの公開鍵認証では、ユーザーのSSH設定、鍵、`known_hosts`を変更しない。
 - unit、adapter、TUI buffer、CLI、DEBUG、隔離sshd integration testを整備済み。
+- macOS 26.5 arm64とシステムOpenSSH 10.2p1で、diagnose、DEBUG logging、
+  TUI起動・復帰・終了、ControlMaster lifecycle、Local／SOCKS実通信を確認済み。
+- macOSの長いtemporary directoryでもOpenSSHのsocket作成用一時suffixを含めた
+  ControlPath上限を守り、安全な短いruntime fallbackを選ぶことを確認済み。
 
 ProxyJumpは実装・隔離検証とも完了しており、release gateには残さない。
-最低対応OpenSSH versionと対話的な認証・host keyの互換性は未確定である。
+最低対応OpenSSH version、他のmacOS versionとmacOS x86_64、および対話的な
+認証・host keyの互換性は未確定である。
 
 ## 0.1.0 Release Gates
 
@@ -114,7 +121,6 @@ security boundary、永続形式、module責務などの重要な判断を変え
 ## Deferred Decisions
 
 - 最低対応OpenSSH version
-- macOSを正式な対応対象へ含める時期と検証範囲
 - TUI終了後もsessionを残すdetach機能
 - remote port discoveryの更新方式と間隔
 - Moshを同じbinaryへ含めるか、独立した機能として提供するか

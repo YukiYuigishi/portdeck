@@ -13,6 +13,8 @@ use thiserror::Error;
 use tracing::Level;
 use tracing_subscriber::fmt::writer::MakeWriterExt;
 
+use crate::platform::effective_uid;
+
 const LOG_DIRECTORY: &str = "portdeck";
 const RETAINED_DEBUG_LOGS: usize = 10;
 const MAX_REMOVALS_PER_START: usize = 64;
@@ -57,9 +59,6 @@ pub enum LoggingError {
     /// HOME is required when XDG_STATE_HOME is absent.
     #[error("HOME is not set; cannot locate the portdeck DEBUG log directory")]
     HomeDirectoryUnavailable,
-    /// Current process ownership could not be determined.
-    #[error("failed to determine current user ID: {0}")]
-    CurrentUser(io::Error),
     /// The log path could not be inspected.
     #[error("failed to inspect DEBUG log path {path}: {source}")]
     Inspect {
@@ -282,10 +281,17 @@ fn prepare_directory(path: &Path) -> Result<(), LoggingError> {
 }
 
 fn validate_directory(path: &Path, metadata: &fs::Metadata) -> Result<(), LoggingError> {
+    validate_directory_for_uid(path, metadata, effective_uid())
+}
+
+fn validate_directory_for_uid(
+    path: &Path,
+    metadata: &fs::Metadata,
+    expected: u32,
+) -> Result<(), LoggingError> {
     if metadata.file_type().is_symlink() || !metadata.is_dir() {
         return Err(LoggingError::NotDirectory(path.to_owned()));
     }
-    let expected = current_uid()?;
     if metadata.uid() != expected {
         return Err(LoggingError::WrongOwner {
             path: path.to_owned(),
@@ -294,12 +300,6 @@ fn validate_directory(path: &Path, metadata: &fs::Metadata) -> Result<(), Loggin
         });
     }
     Ok(())
-}
-
-fn current_uid() -> Result<u32, LoggingError> {
-    fs::metadata("/proc/self")
-        .map(|metadata| metadata.uid())
-        .map_err(LoggingError::CurrentUser)
 }
 
 fn cleanup_owned_logs(directory: &Path, current: &Path) -> Result<(), LoggingError> {
@@ -371,11 +371,16 @@ fn install_debug_panic_hook() {
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
     use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use super::{create_debug_log, is_owned_debug_filename, openssh_version_token};
+    use crate::platform::effective_uid;
+
+    use super::{
+        LoggingError, create_debug_log, is_owned_debug_filename, openssh_version_token,
+        validate_directory_for_uid,
+    };
 
     struct TestDirectory(PathBuf);
 
@@ -412,9 +417,29 @@ mod tests {
         let (second_path, _second) = create_debug_log(&directory).unwrap();
 
         assert_ne!(first_path, second_path);
+        assert_eq!(fs::metadata(&directory).unwrap().uid(), effective_uid());
+        assert_eq!(fs::metadata(&first_path).unwrap().uid(), effective_uid());
+        assert_eq!(fs::metadata(&second_path).unwrap().uid(), effective_uid());
         assert_eq!(mode(&directory), 0o700);
         assert_eq!(mode(&first_path), 0o600);
         assert_eq!(mode(&second_path), 0o600);
+    }
+
+    #[test]
+    fn rejects_a_debug_directory_owned_by_another_uid() {
+        let parent = TestDirectory::new();
+        let metadata = fs::symlink_metadata(&parent.0).unwrap();
+        let actual = metadata.uid();
+        let expected = actual.wrapping_add(1);
+
+        assert!(matches!(
+            validate_directory_for_uid(&parent.0, &metadata, expected),
+            Err(LoggingError::WrongOwner {
+                expected: rejected,
+                actual: owner,
+                ..
+            }) if rejected == expected && owner == actual
+        ));
     }
 
     #[test]

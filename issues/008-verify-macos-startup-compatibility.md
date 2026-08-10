@@ -1,9 +1,10 @@
 # Verify macOS startup compatibility
 
-- Status: In Progress
+- Status: Resolved
 - Priority: High
 - Reported: 2026-08-10
 - Started: 2026-08-10
+- Resolved: 2026-08-10
 - Component: `macos`, `startup`, `runtime`, `logging`, `ssh`, `tui`
 
 ## Summary
@@ -13,9 +14,9 @@ macOSでportdeckが正常に起動しないという報告を再現し、起動�
 portableなUnix実装へ置き換えたうえで、macOS上の起動、OpenSSH
 ControlMaster、Local／SOCKS forwarding、TUI終了までの互換性を検証する。
 
-現時点の[対応環境](../SPEC.md#supported-environment)ではLinuxが第一対象であり、
-macOSはUnix domain socketとOpenSSHの挙動を検証するまでサポート外である。
-このissueを起票しただけではmacOSのsupport statusを変更しない。
+調査開始時点の[対応環境](../SPEC.md#supported-environment)ではLinuxが第一対象で
+あり、macOSはUnix domain socketとOpenSSHの挙動を検証するまでサポート外だった。
+このissueの起票だけではmacOSのsupport statusを変更しないものとした。
 
 ## Background
 
@@ -108,27 +109,27 @@ terminal lifecycleがmacOSで互換であることまでは証明しない。
 
 ## Acceptance criteria
 
-- [ ] macOSで報告された起動失敗の再現環境とfailure stageが、秘密情報を含まない
+- [x] macOSで報告された起動失敗の再現環境とfailure stageが、秘密情報を含まない
   形で記録され、確認したroot causeが推測と区別されている。
-- [ ] `runtime`と`logging`のLinux固有UID取得がportableなUnix実装へ置き換わり、
+- [x] `runtime`と`logging`のLinux固有UID取得がportableなUnix実装へ置き換わり、
   macOSで現在UIDを取得できる一方、directory ownership検証を弱めていない。
-- [ ] portable UID取得、異なるowner、symlink、permission、path fallbackに対する
+- [x] portable UID取得、異なるowner、symlink、permission、path fallbackに対する
   regression coverageがあり、macOSで該当runtime／logging testが成功する。
-- [ ] config、state、runtime pathとControlPathのmacOS差異を監査し、path長、
+- [x] config、state、runtime pathとControlPathのmacOS差異を監査し、path長、
   ownership、permission、stale recoveryの結果が記録されている。
-- [ ] macOS version、architecture、terminal、OpenSSH versionごとのcompatibility
+- [x] macOS version、architecture、terminal、OpenSSH versionごとのcompatibility
   matrixに、diagnose、startup、target discovery、connect、check、Local／SOCKS
   add・cancel、disconnect／exit、TUI quitの結果が記録されている。
-- [ ] lifecycleの成功時も失敗時もterminalが復元され、正常終了後にportdeck所有の
+- [x] lifecycleの成功時も失敗時もterminalが復元され、正常終了後にportdeck所有の
   process、socket、listenerが残らないことを確認している。
-- [ ] repository側の不具合には原因へ対応する最小修正とregression testがあり、
+- [x] repository側の不具合には原因へ対応する最小修正とregression testがあり、
   platformまたは外部要因の場合は制約と利用者への影響が明記されている。
-- [ ] lifecycle matrixの全必須項目が成功するまでmacOSをsupport対象と表現せず、
+- [x] lifecycle matrixの全必須項目が成功するまでmacOSをsupport対象と表現せず、
   証拠によってsupport statusが変わる場合だけ`SPEC.md`、`PLAN.md`、日英の利用者向け
   文書が同じchangeで更新されている。
-- [ ] ユーザーのSSH資産とsecretを変更・保存・公開しておらず、OpenSSHのsecurity
+- [x] ユーザーのSSH資産とsecretを変更・保存・公開しておらず、OpenSSHのsecurity
   boundaryとportdeck専用resourceのownership境界を維持している。
-- [ ] [CONTRIBUTING](../CONTRIBUTING.md#checks)のrequired checksが成功し、
+- [x] [CONTRIBUTING](../CONTRIBUTING.md#checks)のrequired checksが成功し、
   OpenSSH実行挙動を変更した場合は隔離環境のreal OpenSSH integration testも
   macOSで成功している。実行できないcheckは理由と残るriskが記録されている。
 
@@ -157,6 +158,62 @@ terminal lifecycleがmacOSで互換であることまでは証明しない。
 
 ## Resolution
 
-未解決。初期調査ではLinux固有の`/proc/self`によるUID取得がruntime準備とDEBUG
-logging初期化を妨げることまで確認済み。portable UID取得の実装と、その後の
-macOS lifecycle compatibility検証は未着手である。
+macOS 26.5 arm64、システム`/usr/bin/ssh`のOpenSSH 10.2p1
+（LibreSSL 3.3.6）、自動PTY（`TERM=xterm-256color`）で検証した。この組み合わせを
+検証済みbaselineとして対応対象に含める。他のmacOS version、macOS x86_64、最低
+対応OpenSSH versionは未検証であり、このissueでは保証しない。
+
+### Root cause and changes
+
+確認したrepository側の原因は2点だった。
+
+1. `runtime`と`logging`がcurrent userのUIDをLinux固有の`/proc/self`から取得し、
+   macOSではTUI開始前のruntime準備、`--debug`ではlogging初期化でも失敗していた。
+   safeな`rustix::process::geteuid`を共通platform helperから使用するよう変更し、
+   ownership、異なるowner、symlink、mode `0700`／`0600`の検証を維持した。
+2. macOSのOpenSSH 10.2p1はControlMaster socket作成時に17 byteの一時suffixを
+   ControlPathへ付ける。永続ControlPathだけを100 byte以内にしても、suffix込みで
+   DarwinのUnix socket上限を超えていた。合計100 byteの保守的budgetからsuffixを
+   予約し、OpenSSHへ渡すControlPathを83 byte以内にした。未設定時の
+   `std::env::temp_dir()`が長すぎる場合は、owner、実directory、symlink、modeを
+   同じ基準で検証する短い`/tmp/portdeck-<uid>`へfallbackする。明示された
+   `XDG_RUNTIME_DIR`は暗黙に置き換えず、長すぎるControlPathを明確に拒否する。
+
+高速なmacOS filesystem上で露出したtemporary fixture名の衝突とDEBUG capture testの
+並列実行競合も、process IDとatomic counter、および単一subscriberを使って安定化した。
+`#![forbid(unsafe_code)]`とOpenSSHへのargv単位の委譲は維持している。
+
+### Compatibility matrix
+
+| 項目 | macOS 26.5 arm64 / OpenSSH 10.2p1 |
+| --- | --- |
+| `--diagnose` | 成功。システムOpenSSH versionを取得 |
+| `--debug --diagnose` | 成功。directory `0700`、file `0600` |
+| 通常／`--debug` TUI startup | 成功。設定・state・runtime準備とtarget discoveryを完了 |
+| connect / check | 成功。TUI操作と隔離real OpenSSHのControlMasterで確認 |
+| Local add / traffic / cancel | 成功。実TCP通信と取消後のlistener閉鎖を確認 |
+| SOCKS add / traffic / cancel | 成功。direct／ProxyJumpのSOCKS5実通信と取消を確認 |
+| disconnect / exit | 成功。`ssh -O exit`後にControlMaster socketをcleanup |
+| clean TUI quit | 成功。PTYを復元し、所有runtimeを空にして終了 |
+| SIGTERM TUI quit | 成功。PTY event loopからclean exitし、所有runtimeを空にして終了 |
+
+config／stateのXDG path、runtime fallback、ControlPathの83／84 byte境界、異なる
+owner、symlink、permission、専用namespaceだけを対象とするstale recoveryをunit testで
+確認した。隔離integration testは生成したclient config、key、`known_hosts`、runtime、
+ローカルsshdだけを使用した。検証中にユーザーのSSH設定、`known_hosts`、秘密鍵、
+既存ControlMasterを変更せず、接続先や認証情報をrepositoryへ記録していない。
+
+### Verification
+
+- `./scripts/lint.sh`: 成功
+- `cargo test --all-targets --all-features`: 成功
+  - library 109件、CLI 4件、DEBUG logging 4件、SSH adapter 7件
+  - real OpenSSH integration 4件は既定どおりignored
+- `cargo test --test openssh_integration -- --ignored --test-threads=1 --nocapture`:
+  4件すべて成功
+- `cargo run -- --diagnose`: 成功
+- runtime／loggingのtargeted ownership、permission、path test: 成功
+- 通常quit、SIGTERM、DEBUGを含む隔離PTY lifecycle: 成功
+- 変更したMarkdownの相対link検査と`git diff --check`: 成功
+
+実装と記録は`12995ae`、`82d29e8`、`3a7ddf6`、`dcb65c0`、`0068330`に含まれる。

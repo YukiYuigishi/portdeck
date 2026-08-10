@@ -1,453 +1,172 @@
 # AGENTS.md
 
-## Project Overview
+## Purpose
 
-本プロジェクトは、OpenSSHの接続とローカルポートフォワードをTUIから管理するRust製ツールである。
+この文書は、portdeckを変更するエージェントの開発手法と恒久的なengineering guardrailを定める。アプリケーションの詳細仕様やroadmapをここへ複製しない。
 
-中心となる課題は、リモート開発時に毎回 `ssh -L` を組み立て、複数のSSHプロセスと転送ポートを人手で追跡する手間を減らすことにある。
+portdeckは、システムのOpenSSHへSSH接続とport forwardingを委譲し、そのControlMaster sessionとforward ruleをTUIで管理するRust製ツールである。現在の挙動と対象範囲は`SPEC.md`を正とする。
 
-通信、認証、暗号化、SSH設定の解決、TCP中継はシステムのOpenSSHへ委譲する。本ツール自身はSSHプロトコルやTCPプロキシを実装しない。
+## Sources of Truth
 
-プロジェクト名は未定である。文書中では単に「本ツール」と呼ぶ。
+| Concern | Source of truth |
+| --- | --- |
+| 現在のアプリケーション仕様、用語、非目標 | [SPEC.md](SPEC.md) |
+| 現在地、release gate、次の作業、backlog | [PLAN.md](PLAN.md) |
+| 個別変更のscope、受入条件、検証、完了記録 | [issues/](issues/) |
+| 長期的に重要な技術判断とその理由 | [docs/adr/](docs/adr/README.md) |
+| 利用者向けの導入説明 | [README.md](README.md)、[README.ja.md](README.ja.md)、[docs/en/](docs/en/)、[docs/ja/](docs/ja/) |
+| 人間のcontributor向けの環境構築と検証手順 | [CONTRIBUTING.md](CONTRIBUTING.md) |
 
-## Product Goal
+情報は適切なsource of truthだけに記録し、複数文書へ詳細を複製しない。ADRが現行仕様を変える場合は`SPEC.md`も更新する。個別作業の詳細はissueへ置き、`PLAN.md`から必要に応じて参照する。
 
-ユーザーが `~/.ssh/config` の接続先を選び、次の操作をTUI内で完結できる状態を目標とする。
+## Agent Roles
 
-1. SSH接続を開始・終了する。
-2. 接続状態を確認する。
-3. `-L` 相当のローカルポートフォワードを追加・削除する。
-4. どの接続で、どのローカルポートが、どのリモート宛先へ転送されているか確認する。
-5. よく使う転送ルールを接続先ごとに保存して再利用する。
-6. ローカルポートの競合やSSHの失敗理由を把握する。
+### Primary agent
 
-MVPの価値は「面倒な `ssh -L` の組み立てと生存管理を、見える状態で扱えること」に置く。
+Primary agent（root agent）は作業全体のorchestratorであり、次を担当する。
 
-## Product Positioning
+- read-onlyの調査、既存issueとの重複確認、タスク分解、依存関係の整理を行う。
+- issueごとのbranchと専用worktreeを準備し、implementation subagentへ明確なscopeと受入条件を割り当てる。
+- subagentのdiff、commit、検証結果をレビューする。
+- 問題を発見した場合は自分で修正せず、原則としてその変更を担当したimplementation subagentへ戻す。
+- 承認したbranchをmain branchへmergeし、統合後の最終検証とcleanupを行う。
 
-MVPは汎用ターミナル、SSHクライアント、認証情報管理ツールではない。「SSH接続・ポートフォワード管理TUI」である。
+Primary agentは原則としてrepository fileを直接編集しない。実装、テスト、文書、issue、ADRを含むすべてのmaterial changeはimplementation subagentへ委譲する。read-only commandとbranch、worktree、merge、cleanupなどのrepository administrationはprimary agentが行ってよい。
 
-内部設計では将来のMoshなどを妨げないが、先回りしてプラグイン機構や汎用セッション基盤を作らない。まずOpenSSHによるローカルポートフォワードを完成させる。
+### Implementation subagent
 
-## Terminology
+Implementation subagentは、primary agentから割り当てられた変更を実行する担当者であり、次を守る。
 
-- **接続先（target）**: `~/.ssh/config` に記載された具体的な `Host` エイリアス。
-- **SSHセッション（session）**: 本ツールが所有するOpenSSH ControlMaster接続。
-- **転送ルール（forward）**: 接続先に保存された `-L` 相当の定義。
-- **有効な転送（active forward）**: 転送ルールを現在のSSHセッションへ追加した実行状態。
-- **ローカル側**: TUIとOpenSSH Clientを動かしている端末。
-- **リモート側**: OpenSSH Server (`sshd`) が動いている接続先。
-- **リモート宛先**: リモート側から接続する `host:port`。通常は `127.0.0.1:<port>`。
-- **定義状態**: 設定ファイルに保存された接続先や転送ルール。
-- **実行状態**: 現在のControlMasterと転送の状態。
+- 割り当てられた専用worktree内で、実装、テスト、必要な文書、issueまたはADRの更新を完了する。
+- 指定されたscopeと担当fileを越えて変更しない。追加変更が必要なら、編集前にprimary agentへ報告する。
+- primary agentから明示的に指示されない限り、別のsubagentへ再委譲しない。この節の委譲規則はimplementation subagent自身に再帰的な委譲を要求しない。
+- main branchへmergeしない。また、他担当者のworktreeやbranchを変更しない。
+- 論理単位でcommitし、branchがcleanな状態で、commit一覧、検証結果、未解決事項をprimary agentへ報告する。
 
-`localhost` だけではどちら側か曖昧になるため、UI、ログ、文書では可能な限り「ローカル側」「リモート側」と明記する。
+## Issue-driven Development
 
-## Primary User Flow
+### When an issue is required
 
-1. ユーザーがTUIを起動する。
-2. TUIがSSH設定から接続先を一覧表示する。
-3. ユーザーが接続先を選んで接続する。
-4. 本ツールが専用ControlMasterを起動する。
-5. ユーザーがリモート宛先ポートを指定する。
-6. 本ツールがローカル待受ポートを決定し、ControlMasterへ転送追加を依頼する。
-7. TUIが実際のローカル待受とリモート宛先を表示する。
-8. ユーザーが転送またはSSHセッションを終了する。
+次のmaterial changeは、実装や編集を始める前に`issues/`へ起票する。
 
-## MVP Functional Requirements
+- featureまたはbehavior change
+- bug fix
+- 意味のあるrefactor、architectureまたはpersistenceの変更
+- 複数文書に影響する、または運用方針を変えるdocumentation change
+- release gateや検証作業のまとまり
 
-### 1. SSH接続先の表示
+明白なtypo、linkの単純修正、意味を変えないformattingのように履歴を独立して追う価値が低い変更はissueを省略できる。小さくても挙動、互換性、security、運用ルールへ影響する場合は省略しない。
 
-- `~/.ssh/config` と、その `Include` 先から具体的な `Host` エイリアスを列挙する。
-- `Host *`、ワイルドカード、否定パターンは接続候補として直接表示しない。ただしOpenSSHによる設定解決には通常どおり適用される。
-- HostName、User、Port、ProxyJumpなどの有効値を独自に再実装しない。必要な表示情報は `ssh -G <alias>` でOpenSSHに解決させる。
-- 本ツールは `~/.ssh/config` を変更しない。
+起票前に既存のopen／resolved issueを検索し、重複するissueを作らない。既存issueのscopeへ含める場合は、そのissueを更新してから作業する。
 
-### 2. SSHセッションの開始
+### Issue contents
 
-- 接続先ごとに、本ツール専用のControlMasterを1つ起動する。
-- 認証、ホスト鍵確認、鍵のパスフレーズ、ProxyJumpはOpenSSHに任せる。
-- 対話が必要な間はTUI表示を一時停止し、OpenSSHが端末を直接利用できるようにする。
-- 接続成功後はTUIへ戻り、状態を `Connected` として表示する。
-- ユーザーのSSH設定にある暗号方式やホスト鍵検証を緩和しない。
+Issue fileは`issues/NNN-short-description.md`形式とし、少なくとも次を記録する。
 
-概念上の起動コマンドは次のとおりである。実装ではシェル文字列を組み立てず、引数を個別に渡す。
+- Status、Priority、Reported date、Component
+- SummaryとBackground
+- ScopeとNon-goals
+- Acceptance criteria
+- Verification plan
+- Resolution（完了時の実績、検証結果、関連commit）
 
-```text
-ssh -M -N -f \
-  -S <control-path> \
-  -o ClearAllForwardings=yes \
-  <host-alias>
+作業開始時にstatusを`In Progress`、受入条件を満たし統合可能になった時点で`Resolved`へ更新する。実装中にscopeや判断が変わった場合は、コードだけでなくissueも同期する。失敗した検証や残課題を成功したように記録しない。
+
+## Branches, Worktrees, and Commits
+
+- 原則として1 issueにつき1つのdescriptive branchと専用worktreeを用意する。
+- branchは最新のcleanなmain branchから作成する。mainに既存の未commit変更がある場合、それを上書き、退避、破棄しない。
+- 1つのworktreeを複数のimplementation subagentで共有しない。独立して進められるissueだけを並行化する。
+- implementation subagentは割り当てられたworktreeでのみfileを変更する。
+- commitは実装、テスト、文書、issue更新など、review可能な論理単位へ細かく分ける。
+- commit messageは変更の目的が分かる形にする。commitには`--no-gpg-sign`を使用してよい。
+- 関係のないuser changeや別issueの変更をcommitへ含めない。
+- primary agentはレビューと必要な再検証の後、`--no-ff --no-gpg-sign`を使ってmainへmergeする。
+- merge後はmainの統合状態を検証し、cleanであることを確認してから`git worktree remove`と安全なbranch削除を行う。未統合またはdirtyなworktreeを強制削除しない。
+
+## Standard Workflow
+
+1. Primary agentがsource of truth、現在のrepository state、既存issueをread-onlyで調査する。
+2. Material changeならprimary agentが専用branch／worktreeを用意し、implementation subagentへ最初にissueの起票または更新を割り当てる。Subagentはproduct fileより先にissueへscope、non-goals、acceptance criteria、verification planを記録してcommitする。
+3. Primary agentがissueをレビューし、implementation subagentへ確定した担当範囲を割り当てる。
+4. Implementation subagentが変更、テスト、関連文書、issue／ADR更新を行い、論理単位でcommitする。
+5. Primary agentがdiff、commit、受入条件、検証結果をレビューする。不備は担当subagentへ戻す。
+6. Primary agentが承認済みbranchをno-ff mergeし、main上で必要な最終検証を行う。
+7. Primary agentがissueのResolutionとrepositoryのclean状態を確認し、worktreeと統合済みbranchをcleanupする。
+
+複数issueを並行実装する場合も、各issueのownershipとworktreeを分離する。後続branchが先行変更へ依存する場合は、primary agentがmerge順と再base／merge方針を明示し、implementation subagentが独断でmainや他branchを取り込まない。
+
+## Architecture Decision Records
+
+ADRの詳細な運用、index、templateは[docs/adr/README.md](docs/adr/README.md)を正とする。
+
+次のように、後から採用理由を確認する価値がある長期的な判断にはADRを作成する。
+
+- component責務やmodule boundaryの変更
+- securityまたはtrust boundaryの変更
+- persistence schemaやcompatibility policyの変更
+- core dependency、runtime、外部backendの採用
+- CLIやconfigurationに対する意図的な後方非互換変更
+- 有力な代替案が複数あり、将来再検討され得る設計判断
+
+局所的なbug fix、既存判断に沿った通常実装、typo、機械的refactorだけを理由にADRを作らない。
+
+ADRもmaterial changeとしてissueとimplementation subagentのscopeに含める。新しい判断は次の番号で記録し、まず`Proposed`としてreviewする。採用後は`Accepted`とする。判断を置き換える場合は過去ADRの本文を現在の結論へ書き換えず、新しいADRを作成して相互参照し、古いADRを`Superseded`へ変更する。
+
+ADRは「なぜ」を保持するが、現在のアプリケーション仕様の代替にはしない。Accepted ADRが挙動を変更する場合は同じchangeで`SPEC.md`を更新し、roadmapへ影響する場合は`PLAN.md`も更新する。
+
+## Engineering Guardrails
+
+### OpenSSH and security boundary
+
+- SSH protocol、認証、暗号化、SSH設定解決、TCP forwardingはシステムのOpenSSHへ委譲する。合意された仕様変更とADRなしにSSH libraryや独自proxyへ置き換えない。
+- OpenSSHの挙動を推測で実装しない。対象versionの`ssh(1)`／`ssh_config(5)`と隔離された実コマンドで確認する。
+- 外部commandはargvを個別に渡して実行し、`/bin/sh -c`などのshell command constructionを導入しない。
+- ユーザーの`~/.ssh/config`、`known_hosts`、秘密鍵、既存ControlMasterを変更またはtest fixtureとして利用しない。integration testは隔離された一時環境を使う。
+- password、秘密鍵、passphrase、環境変数全体を保存またはlog出力しない。ホスト鍵検証や暗号設定を自動的に弱めない。
+
+### Boundaries and failure handling
+
+- domain state、OpenSSH adapter、configuration／runtime管理、TUI描画の責務を混在させない。TUIからOpenSSH argvを直接構築しない。
+- 外部commandの失敗をpanicや曖昧な成功へ変換しない。終了statusとstderrを構造化し、実行状態とユーザー向けmessageへ反映する。
+- 定義状態と実行状態を区別し、OpenSSHで成功していない操作をUI上だけ成功扱いにしない。
+- 現在必要なboundaryは保つが、将来機能だけを目的とした抽象化、plugin機構、dependencyを先行して追加しない。
+- repositoryがdirtyな場合、既存変更はユーザーまたは別担当者の所有物として扱い、無断で修正、format、revert、commitしない。
+
+### Tests and documentation
+
+- behavior changeには、変更したlayerに対応するtestを追加または更新する。
+- fake executableを使うadapter testではargv、exit status、stdout、stderrとshell展開が発生しないことを検証する。
+- OpenSSH lifecycleやforwardingを変える場合、利用可能な隔離環境で実OpenSSH integration testも実施する。
+- TUI変更ではevent transition、主要rendering、小さいterminalでpanicしないことを検証する。
+- behavior、CLI、key binding、configuration、supported environmentを変えた場合、同じchangeで`SPEC.md`と該当user documentationを更新する。
+- failureを握りつぶしたtestや、ユーザーの実SSH資産に依存するtestを追加しない。
+
+## Required Checks
+
+変更範囲に応じて、少なくとも次を実行する。詳細は[CONTRIBUTING.md](CONTRIBUTING.md)を参照する。
+
+```console
+./scripts/lint.sh
+cargo test --all-targets --all-features
 ```
 
-`ClearAllForwardings=yes` により、本ツールが認識していない `LocalForward` 等を専用ControlMasterへ暗黙に混在させない。既存のSSH設定による転送を取り込む機能はMVP対象外とする。
+OpenSSHの実行挙動を変えた場合は、対応環境で次も実行する。
 
-### 3. SSHセッションの状態確認
-
-- ControlMasterの状態は `ssh -S <control-path> -O check <host-alias>` で確認する。
-- PIDの存在だけを接続成功の根拠にしない。
-- 少なくとも `Disconnected`、`Connecting`、`Connected`、`Stopping`、`Failed` を区別する。
-- 接続が失われた場合、転送も利用不能であることを同じ画面上に反映する。
-- MVPでは無条件の自動再接続を行わない。ユーザー操作による再接続を基本とする。
-
-### 4. ローカルポートフォワードの追加
-
-- 入力項目は次のとおりとする。
-  - ラベル（任意）
-  - ローカル待受アドレス。既定値は `127.0.0.1`
-  - 希望ローカルポート。省略時はリモートポートと同じ番号
-  - リモート宛先ホスト。既定値は `127.0.0.1`
-  - リモート宛先ポート。必須
-- 転送はControlMasterへ動的に追加する。
-
-```text
-ssh -S <control-path> \
-  -o ClearAllForwardings=no \
-  -O forward \
-  -L <bind-address>:<local-port>:<remote-host>:<remote-port> \
-  <host-alias>
+```console
+cargo test --test openssh_integration -- --ignored --test-threads=1 --nocapture
 ```
 
-- OpenSSHの終了ステータスが成功になるまで、転送を `Active` と表示しない。
-- ローカルポートが使用中の場合は、次の候補を限定回数試し、実際に確保できた番号を表示する。
-- OpenSSHのローカル転送ではポート `0` の割当結果を取得する標準手段に依存しない。事前のbind確認だけで成功とみなさず、最終的な成否はOpenSSHの転送追加結果で判定する。
-- 任意のアドレスへの公開は暗黙に行わない。`0.0.0.0`、`::`、`*` を指定する場合は警告を表示する。
-
-### 5. ローカルポートフォワードの削除
-
-- 追加時に使用した正規化済み転送指定を保存する。
-- 削除時は同じ指定を使ってControlMasterへ取消を依頼する。
-
-```text
-ssh -S <control-path> \
-  -o ClearAllForwardings=no \
-  -O cancel \
-  -L <bind-address>:<local-port>:<remote-host>:<remote-port> \
-  <host-alias>
-```
-
-- OpenSSHが取消に失敗した場合、UI上だけ削除して成功したように見せない。
-
-### 6. SSHセッションの終了
-
-- セッション終了時は `ssh -S <control-path> -O exit <host-alias>` を使う。
-- セッション終了に伴って、その配下の転送を非アクティブとして扱う。
-- 通常終了時、本ツールが所有するControlMasterは明示的に終了する。
-- TUIを閉じても接続を維持するdetach機能はMVP対象外とする。
-
-### 7. 状態表示とエラー表示
-
-- 接続先ごとに、接続状態と有効な転送数を表示する。
-- 転送ごとに、ラベル、状態、ローカル待受、リモート宛先を表示する。
-- OpenSSHの標準エラーをユーザーが確認できるようにする。
-- エラーは少なくとも次を区別する。
-  - OpenSSHが見つからない
-  - 接続・認証失敗
-  - ControlMasterが存在しない
-  - ローカルポート競合
-  - サーバー側ポートフォワード拒否
-  - 転送取消失敗
-  - SSH設定の解析失敗
-
-### 8. 転送ルールの保存
-
-- ラベル、bind address、希望ローカルポート、リモート宛先を接続先ごとに保存する。
-- 保存済みルールと、現在OpenSSHへ追加されている有効な転送を区別する。
-- TUIを再起動しても保存済みルールを確認・再利用できる。
-- MVPでは保存済みルールを起動時に自動接続・自動有効化しない。
-- 認証情報、秘密鍵、鍵パスフレーズ、OpenSSHの実行時PIDは保存しない。
-
-## Post-MVP Requirements
-
-優先度順の候補であり、MVP完了前に着手しない。
-
-### Remote Port Discovery
-
-- 既存ControlMaster上でリモートコマンドを実行し、listen中のTCPポートを取得する。
-- Linuxでは最初に `ss -H -ltn` を対象とする。
-- `ss -H -ltnp` のプロセス情報は権限により欠落する前提で扱う。sudoを要求しない。
-- 検出したポートから転送追加フォームを開けるようにする。
-- ポートが消えた場合は「リモートでlistenしていない」と表示するが、SSHセッション切断とは区別する。
-
-### Protocol Hint
-
-- 転送ルールに `tcp`、`http`、`https` の表示用ヒントを持たせる。
-- これはURL表示やブラウザ起動にのみ使用し、HTTP解析、TLS終端、HTTPからHTTPSへの変換は行わない。
-- SSHローカルフォワードは常に生のTCPを転送する。
-
-### Automatic Activation
-
-- 自動接続・自動転送は明示的に有効化されたルールだけを対象とする。
-
-### Mosh
-
-- 接続先定義をSSHと共有し、Moshセッションを起動・表示できるようにする。
-- Moshはポートフォワード機能を提供しないため、SSH転送とは別の能力として扱う。
-- Mosh対応のためにMVPのOpenSSH転送モデルを一般化しすぎない。
-
-## Non-Goals
-
-MVPでは以下を実装しない。
-
-- SSHプロトコル、暗号、認証のRustによる再実装
-- Rustによる独自SOCKSプロキシまたは独自TCPプロキシ（OpenSSH `-D`への委譲は対応済み）
-- リモート側エージェントや専用デーモン
-- `-R` リモートフォワード
-- VPN、TUN/TAP
-- SFTPファイラー
-- ターミナルエミュレーター
-- SSH鍵、パスワード、秘密情報の保管
-- TLS証明書の発行やTLS終端
-- Windowsネイティブ対応
-- 汎用プラグインシステム
-
-## Supported Environment
-
-- MVPの第一対象はLinuxクライアントとする。
-- システムにOpenSSH Clientがインストールされていることを前提とする。
-- リモート側は標準的なOpenSSH Serverを前提とし、専用ソフトウェアを要求しない。
-- macOSはUnix domain socketとOpenSSHの挙動を検証後に対応対象へ含める。
-- WindowsはControlMaster、端末制御、パスの扱いを別途設計するまで対象外とする。
-
-## Architecture
-
-```text
-TUI
-  ↓ user intent / rendered state
-Application State
-  ├─ Target Catalog
-  ├─ Session Manager
-  └─ Forward Manager
-       ↓
-OpenSSH Adapter
-  ↓ argv-based process execution
-System OpenSSH Client
-  ↓ ControlMaster / SSH channels
-Remote sshd
-```
-
-### Component Responsibilities
-
-#### `domain`
-
-- 接続先、SSHセッション、転送ルール、状態遷移を表現する。
-- TUIフレームワークやプロセス実行APIへ依存しない。
-
-#### `ssh`
-
-- OpenSSHコマンドの構築と実行を担当する。
-- `connect`、`check`、`add_local_forward`、`cancel_local_forward`、`disconnect` を提供する。
-- 標準出力、標準エラー、終了ステータスを構造化して返す。
-- シェルを介さず、すべての引数を `Command::arg` 相当で渡す。
-
-#### `config`
-
-- SSH Hostエイリアスの列挙を担当する。
-- OpenSSH設定の完全な意味解釈は行わない。
-- 本ツール固有のラベルや保存済み転送ルールを読み書きする。
-
-#### `runtime`
-
-- ControlPath用ディレクトリと実行中セッションの対応を管理する。
-- 起動時の残存ControlMaster検出と終了処理を担当する。
-
-#### `tui`
-
-- 入力、選択、モーダル、状態表示を担当する。
-- OpenSSHコマンド文字列を直接生成しない。
-
-## Domain Model
-
-概念上、次の情報を保持する。フィールド名や直列化形式は実装時に調整してよいが、責務を混在させない。
-
-```text
-Target
-  id
-  host_alias
-  source
-
-Session
-  id
-  target_id
-  control_path
-  state
-  last_error
-
-ForwardRule
-  id
-  target_id
-  label
-  bind_address
-  requested_local_port
-  remote_host
-  remote_port
-
-ActiveForward
-  rule_id
-  session_id
-  actual_local_port
-  runtime_state
-  last_error
-```
-
-`ForwardRule` は接続先に属する永続的な定義、`ActiveForward` は現在のSSHセッションに属する実行状態である。
-
-`requested_local_port` と `actual_local_port` を分離する。ポート競合時に実際の番号が変わっても、ユーザーの希望値を失わないためである。
-
-## State Model
-
-### Session State
-
-```text
-Disconnected → Connecting → Connected → Stopping → Disconnected
-                      ↓           ↓
-                    Failed      Failed
-```
-
-### Forward State
-
-```text
-Inactive → Adding → Active → Removing → Inactive
-              ↓         ↓          ↓
-            Failed    Unavailable  Failed
-```
-
-- `Unavailable` は親SSHセッションが切断された状態を表す。
-- UI操作の途中で非同期結果が返っても、古い操作結果で新しい状態を上書きしない。
-- 状態変更はアプリケーション層に集約し、描画処理から直接変更しない。
-
-## Control Socket Management
-
-- ControlPathは本ツール専用のランタイムディレクトリに置く。
-- Linuxでは `$XDG_RUNTIME_DIR/<app>/` を優先し、所有者だけがアクセスできる `0700` のディレクトリを使用する。
-- ControlPathはUnix domain socketのパス長制限を考慮し、短い固定ディレクトリと接続先IDのハッシュで構成する。
-- 他ツールやユーザーが作成したControlMasterを勝手に採用・終了しない。
-- 接続先文字列をそのままファイルパスへ埋め込まない。
-- 正常終了時は全専用ControlMasterを終了する。
-- 異常終了後に残った専用ソケットは、次回起動時に `-O check` で実体を確認してから回収する。単にsocketファイルを削除して生存中のmasterを孤立させない。
-
-## Persistence
-
-- 永続化対象は接続先への付加情報と保存済み転送ルールであり、認証情報や実行状態ではない。
-- 初期実装ではTOMLなど人間が確認できる単一設定ファイルで十分であり、DBを導入しない。
-- LinuxではXDG Base Directoryに従う。
-- 設定更新は一時ファイルへ書いてからrenameするなど、途中終了で壊れにくい方法を使う。
-- 実行中PIDだけを永続的な真実として保存しない。状態はControlMasterへ問い合わせて再構築する。
-
-## TUI Requirements
-
-MVPは少なくとも次の2ペイン構成を持つ。
-
-```text
-┌ Targets / Sessions ─────┬ Forwards ─────────────────────────────┐
-│ ● dev-server            │ web   127.0.0.1:8080 → 127.0.0.1:3000 │
-│ ○ research-server       │ db    127.0.0.1:5432 → db:5432        │
-└─────────────────────────┴───────────────────────────────────────┘
- Status / error / key help
-```
-
-- 左ペインは接続先とセッション状態を表示する。
-- 右ペインは選択中セッションの転送を表示する。
-- 接続、切断、転送追加、転送削除、再確認、終了をキーボードで行える。
-- 破壊的操作は対象が明確になる確認表示を行う。
-- 色だけに依存せず、記号または文字でも状態を示す。
-- OpenSSHによる対話が必要な場合、TUIを安全にsuspend/resumeする。
-- 小さい端末では詳細を省略しても、ローカルポートとリモートポートは確認できるようにする。
-
-## Security Requirements
-
-- SSH認証と暗号処理はOpenSSHへ委譲する。
-- パスワード、秘密鍵、鍵パスフレーズを取得・保存・ログ出力しない。
-- `StrictHostKeyChecking=no` や `UserKnownHostsFile=/dev/null` を自動指定しない。
-- コマンド実行に `/bin/sh -c` 等を使わない。
-- Hostエイリアス、アドレス、ラベルを個別の引数・データとして扱い、コマンド文字列へ連結しない。
-- `-` で始まる不正なHostエイリアスや、改行・NULを含む入力を拒否する。
-- 既定のbind addressは `127.0.0.1` とする。
-- 外部公開bindは明示操作と警告を必要とする。
-- ControlPathディレクトリを他ユーザーが書き込める場所に置かない。
-- ログには秘密情報や環境変数全体を含めない。
-
-## Failure Handling
-
-- 外部コマンドの失敗をpanicへ変換しない。
-- ユーザー向けの短い要約と、必要に応じて確認できるOpenSSH stderrを分ける。
-- 追加処理の途中で失敗した転送を `Active` として残さない。
-- ControlMaster切断後に `-O cancel` が失敗しても、定義状態と実行状態を分離して表示する。
-- ポート探索には上限を設け、無制限にスキャンしない。
-- 接続失敗時に認証方式やホスト鍵検証を勝手に変更して再試行しない。
-
-## Technology Direction
-
-- Language: Rust stable
-- TUI: `ratatui`
-- Terminal backend: `crossterm`
-- Serialization: `serde`
-- Error representation: `thiserror` または同等の明示的なエラー型
-- Logging: `tracing` または同等の構造化ログ
-- SSH backend: システムの `ssh` コマンド
-
-非同期ランタイムは、プロセス監視とTUIイベント処理の必要性を確認して選ぶ。依存追加そのものを目的にTokio等を導入しない。
-
-## Extensibility Boundary
-
-- TUIはOpenSSHの具体的なコマンドラインを知らない。
-- アプリケーション層は「セッションの開始・終了・状態確認」と「ローカル転送の追加・削除」を別の能力として扱う。
-- Moshは将来、セッション起動能力として追加できるが、ローカル転送能力を実装しない。
-- すべてのバックエンドに同じ機能があるという前提を置かない。
-- MVPではバックエンドの動的ロードや外部プラグインAPIを作らない。
-
-## Testing Requirements
-
-### Unit Tests
-
-- Hostエイリアスの抽出と入力検証
-- ControlPath IDの安定性と衝突回避
-- OpenSSH argvの構築
-- IPv4、ホスト名、IPv6を含む転送指定の正規化
-- セッションと転送の状態遷移
-- ポート候補選択の上限
-- 設定ファイルのround-trip
-
-### Adapter Tests
-
-- テスト用の偽 `ssh` 実行ファイルを使い、引数、終了コード、stdout、stderrを検証する。
-- 接続成功、接続失敗、check失敗、forward失敗、cancel失敗を再現する。
-- シェル展開が起きず、入力が単一引数として渡されることを検証する。
-
-### Integration Tests
-
-- 利用可能な環境ではローカルのテスト用sshdを使う。
-- ControlMasterの開始、`-O check`、転送追加、実通信、取消、終了を確認する。
-- 統合テストはユーザーの実際の `~/.ssh/config` や既存ControlMasterを変更しない。
-
-### TUI Tests
-
-- 主要状態の描画を固定サイズのバッファで検証する。
-- 接続、追加、削除、エラー詳細表示のイベント遷移を検証する。
-- 小さい端末サイズでもpanicしないことを検証する。
-
-## MVP Acceptance Criteria
-
-- `~/.ssh/config` の具体的なHostをTUIで選択できる。
-- 選択したHostへ専用ControlMasterを開始できる。
-- 接続状態を `-O check` で確認できる。
-- `127.0.0.1:<local>` からリモート側 `<host>:<port>` への転送を追加できる。
-- ポート競合時に別ポートを選び、実際のローカルポートを表示できる。
-- 転送を個別に取消できる。
-- 転送ルールを接続先ごとに保存し、再起動後に再利用できる。
-- SSHセッションを終了できる。
-- 認証情報を保存せず、SSH設定の安全性を低下させない。
-- 失敗時に原因確認に必要なOpenSSH stderrへアクセスできる。
-- 正常終了時に本ツール所有のControlMasterを残さない。
-
-## Engineering Rules for Agents
-
-- OpenSSHの挙動を推測で実装せず、対象バージョンの `ssh(1)` / `ssh_config(5)` と実コマンドで確認する。
-- SSHライブラリの導入や独自TCP中継への変更は、要件変更として明示的に合意されない限り行わない。
-- ユーザーの `~/.ssh/config`、known_hosts、秘密鍵をテストで変更しない。
-- 外部コマンドは必ずargv配列として実行し、シェルを介さない。
-- エラーを握りつぶさず、状態とユーザー向けメッセージへ反映する。
-- TUI描画、ドメイン状態、OpenSSH実行を同じモジュールに混在させない。
-- 新機能を追加する際は、MVPの非目標と `PLAN.md` の順序を確認する。
-- 振る舞いを変更した場合は、対応するテストと文書も更新する。
-- 将来機能のためだけの抽象化を追加しない。現在必要な境界を保ち、後から置換可能にする。
+Documentation-only changeでも相対Markdown linkと`git diff --check`を検査する。検証を実行できない場合は、省略理由と残るriskをissueのResolutionとprimary agentへの報告に記載する。
+
+## Definition of Done
+
+変更は次をすべて満たしたときに完了とする。
+
+- issueのscopeとacceptance criteriaを満たし、Non-goalsへ不要に踏み込んでいない。
+- relevant test、lint、integration checkが成功し、実行できないcheckが明記されている。
+- current behavior、roadmap、decision rationale、user guidanceがそれぞれ正しいsource of truthへ反映されている。
+- errorとsecurity boundaryが維持され、user SSH assetsやsecretを変更・露出していない。
+- commitが論理単位に分かれ、implementation branchとmainが所定の時点でcleanである。
+- issueが`Resolved`となり、Resolutionに実績、検証結果、関連commitが記録されている。
+- primary agentによるreview、no-ff merge、main上の最終検証、worktree／branch cleanupが完了している。

@@ -1508,7 +1508,7 @@ mod tests {
     use std::fs;
     use std::io;
     use std::path::{Path, PathBuf};
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use ratatui::Terminal;
@@ -1605,18 +1605,17 @@ mod tests {
         runtime_path: PathBuf,
     }
 
+    static NEXT_TEST_RUNTIME_ID: AtomicU64 = AtomicU64::new(0);
+
     impl Fixture {
         fn new() -> Self {
             Self::with_aliases(&["dev-server"])
         }
 
         fn with_aliases(aliases: &[&str]) -> Self {
-            let unique = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos();
-            let runtime_path = std::env::temp_dir()
-                .join(format!("portdeck-tui-test-{}-{unique}", std::process::id()));
+            let unique = NEXT_TEST_RUNTIME_ID.fetch_add(1, Ordering::Relaxed);
+            let runtime_path =
+                std::env::temp_dir().join(format!("t{:x}{unique:x}", std::process::id()));
             let runtime = RuntimeDirectory::prepare(&runtime_path).unwrap();
             let targets = aliases
                 .iter()

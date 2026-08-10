@@ -1407,8 +1407,8 @@ mod tests {
     use std::io;
     use std::io::Write;
     use std::path::{Path, PathBuf};
-    use std::sync::{Arc, Mutex};
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::{Arc, Mutex, Once};
 
     use crate::config::RuleStore;
     use crate::domain::{
@@ -1427,6 +1427,7 @@ mod tests {
     struct CaptureWriter(Arc<Mutex<Vec<u8>>>);
 
     static DEBUG_CAPTURE_LOCK: Mutex<()> = Mutex::new(());
+    static TEST_TRACING_INIT: Once = Once::new();
 
     impl Write for CaptureWriter {
         fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
@@ -1440,6 +1441,13 @@ mod tests {
     }
 
     fn capture_debug_events(action: impl FnOnce()) -> String {
+        TEST_TRACING_INIT.call_once(|| {
+            let subscriber = tracing_subscriber::fmt()
+                .with_max_level(tracing::Level::DEBUG)
+                .with_writer(io::sink)
+                .finish();
+            tracing::subscriber::set_global_default(subscriber).unwrap();
+        });
         let _guard = DEBUG_CAPTURE_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1583,16 +1591,12 @@ mod tests {
 
     struct TestRuntime(PathBuf);
 
+    static NEXT_TEST_RUNTIME_ID: AtomicU64 = AtomicU64::new(0);
+
     impl TestRuntime {
         fn new() -> Self {
-            let unique = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos();
-            let path = std::env::temp_dir().join(format!(
-                "portdeck-manager-test-{}-{unique}",
-                std::process::id()
-            ));
+            let unique = NEXT_TEST_RUNTIME_ID.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!("a{:x}{unique:x}", std::process::id()));
             let runtime = RuntimeDirectory::prepare(&path).unwrap();
             drop(runtime);
             Self(path)
@@ -2429,7 +2433,10 @@ mod tests {
         });
 
         assert!(events.contains("operation=\"connect\""));
-        assert!(events.contains("operation=\"add_local_forward\""));
+        assert!(
+            events.contains("operation=\"add_local_forward\""),
+            "{events}"
+        );
         assert!(events.contains("operation=\"add_dynamic_forward\""));
         assert!(events.contains("operation=\"cancel_local_forward\""));
         assert!(events.contains("operation=\"cancel_dynamic_forward\""));

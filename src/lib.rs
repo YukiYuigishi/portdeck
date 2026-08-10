@@ -9,6 +9,7 @@ pub mod config;
 pub mod domain;
 pub mod error;
 pub mod logging;
+mod platform;
 pub mod runtime;
 pub mod ssh;
 pub mod tui;

@@ -1,8 +1,8 @@
-# NNNN: Decision title
+# ADR-NNNN: Decision title
 
 - Status: Proposed
 - Date: YYYY-MM-DD
-- Related issue: `../../issues/NNN-short-description.md`
+- Related issue: [Issue NNN](../../issues/NNN-short-description.md)
 - Supersedes: N/A
 - Superseded by: N/A
 
@@ -24,5 +24,5 @@
 
 ## References
 
-- `../../issues/NNN-short-description.md`
+- [Issue NNN](../../issues/NNN-short-description.md)
 - 関連する仕様、実装、検証記録、上位または置換対象ADRへの相対path

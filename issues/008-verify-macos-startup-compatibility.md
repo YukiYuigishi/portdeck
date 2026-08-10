@@ -1,8 +1,9 @@
 # Verify macOS startup compatibility
 
-- Status: Open
+- Status: In Progress
 - Priority: High
 - Reported: 2026-08-10
+- Started: 2026-08-10
 - Component: `macos`, `startup`, `runtime`, `logging`, `ssh`, `tui`
 
 ## Summary

@@ -281,10 +281,17 @@ fn prepare_directory(path: &Path) -> Result<(), LoggingError> {
 }
 
 fn validate_directory(path: &Path, metadata: &fs::Metadata) -> Result<(), LoggingError> {
+    validate_directory_for_uid(path, metadata, effective_uid())
+}
+
+fn validate_directory_for_uid(
+    path: &Path,
+    metadata: &fs::Metadata,
+    expected: u32,
+) -> Result<(), LoggingError> {
     if metadata.file_type().is_symlink() || !metadata.is_dir() {
         return Err(LoggingError::NotDirectory(path.to_owned()));
     }
-    let expected = effective_uid();
     if metadata.uid() != expected {
         return Err(LoggingError::WrongOwner {
             path: path.to_owned(),
@@ -370,7 +377,10 @@ mod tests {
 
     use crate::platform::effective_uid;
 
-    use super::{create_debug_log, is_owned_debug_filename, openssh_version_token};
+    use super::{
+        LoggingError, create_debug_log, is_owned_debug_filename, openssh_version_token,
+        validate_directory_for_uid,
+    };
 
     struct TestDirectory(PathBuf);
 
@@ -413,6 +423,23 @@ mod tests {
         assert_eq!(mode(&directory), 0o700);
         assert_eq!(mode(&first_path), 0o600);
         assert_eq!(mode(&second_path), 0o600);
+    }
+
+    #[test]
+    fn rejects_a_debug_directory_owned_by_another_uid() {
+        let parent = TestDirectory::new();
+        let metadata = fs::symlink_metadata(&parent.0).unwrap();
+        let actual = metadata.uid();
+        let expected = actual.wrapping_add(1);
+
+        assert!(matches!(
+            validate_directory_for_uid(&parent.0, &metadata, expected),
+            Err(LoggingError::WrongOwner {
+                expected: rejected,
+                actual: owner,
+                ..
+            }) if rejected == expected && owner == actual
+        ));
     }
 
     #[test]

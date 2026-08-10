@@ -3,6 +3,7 @@
 //! Resources managed here belong exclusively to portdeck.
 
 use std::env;
+use std::ffi::OsString;
 use std::fmt::Write as _;
 use std::fs;
 use std::io;
@@ -30,17 +31,11 @@ pub struct RuntimeDirectory {
 impl RuntimeDirectory {
     /// Resolves and prepares the Unix runtime directory.
     pub fn from_environment() -> Result<Self, RuntimeError> {
-        let path =
-            if let Some(base) = env::var_os("XDG_RUNTIME_DIR").filter(|value| !value.is_empty()) {
-                let base = PathBuf::from(base);
-                if !base.is_absolute() {
-                    return Err(RuntimeError::RelativeXdgRuntimeDirectory(base));
-                }
-                base.join(APPLICATION_DIRECTORY)
-            } else {
-                let uid = effective_uid();
-                env::temp_dir().join(format!("{APPLICATION_DIRECTORY}-{uid}"))
-            };
+        let path = resolve_runtime_path(
+            env::var_os("XDG_RUNTIME_DIR").filter(|value| !value.is_empty()),
+            &env::temp_dir(),
+            effective_uid(),
+        )?;
 
         Self::prepare(path)
     }
@@ -159,6 +154,22 @@ impl RuntimeDirectory {
     }
 }
 
+fn resolve_runtime_path(
+    xdg_runtime_directory: Option<OsString>,
+    temporary_directory: &Path,
+    uid: u32,
+) -> Result<PathBuf, RuntimeError> {
+    if let Some(base) = xdg_runtime_directory {
+        let base = PathBuf::from(base);
+        if !base.is_absolute() {
+            return Err(RuntimeError::RelativeXdgRuntimeDirectory(base));
+        }
+        Ok(base.join(APPLICATION_DIRECTORY))
+    } else {
+        Ok(temporary_directory.join(format!("{APPLICATION_DIRECTORY}-{uid}")))
+    }
+}
+
 /// Runtime directory or ControlPath management failure.
 #[derive(Debug, Error)]
 pub enum RuntimeError {
@@ -270,7 +281,9 @@ mod tests {
     use crate::domain::TargetId;
     use crate::platform::effective_uid;
 
-    use super::{RuntimeDirectory, RuntimeError};
+    use super::{
+        RuntimeDirectory, RuntimeError, resolve_runtime_path, validate_existing_directory,
+    };
 
     struct TestDirectory(PathBuf);
 
@@ -312,6 +325,42 @@ mod tests {
             fs::metadata(path).unwrap().permissions().mode() & 0o777,
             0o700
         );
+    }
+
+    #[test]
+    fn resolves_explicit_xdg_and_uid_scoped_fallback_paths() {
+        let parent = TestDirectory::new();
+        let xdg = parent.child("xdg");
+
+        assert_eq!(
+            resolve_runtime_path(Some(xdg.as_os_str().to_owned()), parent.path(), 42).unwrap(),
+            xdg.join("portdeck")
+        );
+        assert_eq!(
+            resolve_runtime_path(None, parent.path(), 42).unwrap(),
+            parent.path().join("portdeck-42")
+        );
+        assert!(matches!(
+            resolve_runtime_path(Some("relative".into()), parent.path(), 42),
+            Err(RuntimeError::RelativeXdgRuntimeDirectory(_))
+        ));
+    }
+
+    #[test]
+    fn rejects_a_runtime_directory_owned_by_another_uid() {
+        let parent = TestDirectory::new();
+        let metadata = fs::symlink_metadata(parent.path()).unwrap();
+        let actual = metadata.uid();
+        let expected = actual.wrapping_add(1);
+
+        assert!(matches!(
+            validate_existing_directory(parent.path(), &metadata, expected),
+            Err(RuntimeError::WrongOwner {
+                expected: rejected,
+                actual: owner,
+                ..
+            }) if rejected == expected && owner == actual
+        ));
     }
 
     #[test]

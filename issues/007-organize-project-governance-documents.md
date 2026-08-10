@@ -1,8 +1,9 @@
 # Organize project governance documents
 
-- Status: In Progress
+- Status: Resolved
 - Priority: Medium
 - Reported: 2026-08-10
+- Resolved: 2026-08-10
 - Component: `documentation`, `project-governance`
 
 ## Summary
@@ -85,13 +86,70 @@
 
 ## Acceptance criteria
 
-- [ ] `SPEC.md`が新設され、現在のアプリケーション仕様が`AGENTS.md`から移されている。
-- [ ] `AGENTS.md`が開発手法、基本方針、primary agent／implementation subagentの役割を中心とする文書になっている。
-- [ ] issue起票、専用worktree、commit、review、merge、verification、cleanupまでのworkflowが`AGENTS.md`に明記されている。
-- [ ] `PLAN.md`がcurrent status、release gates、next work、Post-MVP backlog、deferred decisionsを中心に整理されている。
-- [ ] 完了済みProxyJump検証など、既知の実績が`PLAN.md`へ正しく反映されている。
-- [ ] `docs/adr/`に運用方針、template、主要な既存判断のaccepted ADRがある。
-- [ ] ADRを作成する判断基準と、supersede時に過去の記録を保持する方法が明記されている。
-- [ ] 仕様、計画、issue、ADR、ユーザー文書の責務と参照関係に不必要な重複がない。
-- [ ] アプリケーションの実行時動作や未実装機能に変更がない。
-- [ ] 相対Markdown linkと`git diff --check`の検査が成功する。
+- [x] `SPEC.md`が新設され、現在のアプリケーション仕様が`AGENTS.md`から移されている。
+- [x] `AGENTS.md`が開発手法、基本方針、primary agent／implementation subagentの役割を中心とする文書になっている。
+- [x] issue起票、専用worktree、commit、review、merge、verification、cleanupまでのworkflowが`AGENTS.md`に明記されている。
+- [x] `PLAN.md`がcurrent status、release gates、next work、Post-MVP backlog、deferred decisionsを中心に整理されている。
+- [x] 完了済みProxyJump検証など、既知の実績が`PLAN.md`へ正しく反映されている。
+- [x] `docs/adr/`に運用方針、template、主要な既存判断のaccepted ADRがある。
+- [x] ADRを作成する判断基準と、supersede時に過去の記録を保持する方法が明記されている。
+- [x] 仕様、計画、issue、ADR、ユーザー文書の責務と参照関係に不必要な重複がない。
+- [x] アプリケーションの実行時動作や未実装機能に変更がない。
+- [x] 相対Markdown linkと`git diff --check`の検査が成功する。
+
+## Resolution
+
+2026-08-10に文書を再構成し、統合後の横断監査を完了した。
+
+### Document structure
+
+- `SPEC.md`を現在のアプリケーション仕様のsource of truthとして新設し、製品目標、用語、Local／SOCKS forward、target検索、rule編集、Vim風pane移動、DEBUG mode、runtime／persistence、security、testing、現在の受入条件をまとめた。
+- `AGENTS.md`を開発手法と恒久的なengineering guardrailへ絞り、primary agentとimplementation subagentの非再帰的な役割分担を定めた。
+- issue起票、専用branch／worktree、論理単位のcommit、primary agent review、no-ff merge、main上のverification、clean確認、worktree／branch cleanupまでを標準workflowとして記録した。
+- `PLAN.md`をcurrent status、0.1.0 release gates、next work、Post-MVP backlog、deferred decisionsへ整理した。
+- ProxyJumpについて、ControlMaster lifecycleとSOCKS5実通信は隔離環境で検証済み、最低OpenSSH versionと対話認証／host key互換性は未完了という範囲を明記した。
+- `issues/`、ADR、仕様、計画、ユーザー文書の責務を分け、詳細を複製せず相対linkで参照する方針を定めた。
+
+### Architecture decision records
+
+- `docs/adr/README.md`と`_template.md`を追加し、ADRの作成基準、連番、status、review lifecycle、supersede方法、issue／SPEC／PLANとの関係を定めた。
+- 既存の実装と検証記録を根拠として、システムOpenSSHへの委譲、targetごとの専用ControlMaster、保存済み定義と実行状態の分離、SOCKS forwardingのOpenSSH `-D`への委譲をADR-0001〜0004として遡及記録した。
+- 4件のADRがindexへ番号順に登録され、すべて`Accepted`であることを確認した。
+
+### Verification results
+
+- `d21dd64..236f2cd`の変更対象がgovernance文書だけで、application code、test、user documentationを変更していないことを確認した。
+- `AGENTS.md`、`SPEC.md`、`PLAN.md`、`docs/adr/`を横断し、source-of-truthの責務、workflow、現行機能、Non-Goals、security boundary、release gatesが失われていないことを確認した。
+- ADR template内の意図的なplaceholderを除く相対Markdown link 98件を検査し、broken linkが0件であることを確認した。
+- `git diff --check`に成功した。
+- `./scripts/lint.sh`に成功した。
+- main統合後の通常testはunit 104件、CLI 4件、DEBUG 4件、SSH adapter 7件が成功した。
+- main統合後の実OpenSSH integration testは4件すべて成功し、direct Local、direct SOCKS5、ProxyJump ControlMaster lifecycle、ProxyJump SOCKS5を確認した。
+
+### Related commits
+
+Specification:
+
+- `095f87a docs(spec): define current application behavior`
+- `b46bf34 docs(spec): align checks and persistence scope`
+
+Agent workflow and ADR process:
+
+- `21a6a71 docs(agents): define delegated development workflow`
+- `f69406e docs(adr): establish decision record process`
+- `c4b1834 docs(adr): align decision record template`
+
+Plan and accepted ADRs:
+
+- `6026546 docs(plan): focus on release gates and backlog`
+- `e68efa0 docs(adr): record system OpenSSH delegation`
+- `16ecbac docs(adr): record dedicated ControlMaster ownership`
+- `97a5d46 docs(adr): record saved and runtime state split`
+- `80790b1 docs(adr): record OpenSSH SOCKS delegation`
+- `8eaa804 docs(plan): clarify verified forwarding paths`
+
+Merge commits:
+
+- `3cfcf19 merge: add current application specification`
+- `f0b14b0 merge: establish delegated development workflow`
+- `236f2cd merge: organize roadmap and architecture decisions`

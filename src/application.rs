@@ -1596,7 +1596,7 @@ mod tests {
     impl TestRuntime {
         fn new() -> Self {
             let unique = NEXT_TEST_RUNTIME_ID.fetch_add(1, Ordering::Relaxed);
-            let path = std::env::temp_dir().join(format!("a{:x}{unique:x}", std::process::id()));
+            let path = Path::new("/tmp").join(format!("a{:x}{unique:x}", std::process::id()));
             let runtime = RuntimeDirectory::prepare(&path).unwrap();
             drop(runtime);
             Self(path)

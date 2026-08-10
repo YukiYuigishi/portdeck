@@ -21,6 +21,10 @@ const APPLICATION_DIRECTORY: &str = "portdeck";
 const CONTROL_PREFIX: &str = "cm-";
 const CONTROL_HASH_BYTES: usize = 16;
 const SAFE_UNIX_SOCKET_PATH_LENGTH: usize = 100;
+const OPENSSH_TEMPORARY_SUFFIX_RESERVE: usize = 17;
+const SAFE_CONTROL_PATH_LENGTH: usize =
+    SAFE_UNIX_SOCKET_PATH_LENGTH - OPENSSH_TEMPORARY_SUFFIX_RESERVE;
+const SHORT_TEMPORARY_DIRECTORY: &str = "/tmp";
 
 /// Owner-only directory containing portdeck ControlPath sockets.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -99,11 +103,11 @@ impl RuntimeDirectory {
 
         let path = self.path.join(name);
         let length = path.as_os_str().as_bytes().len();
-        if length > SAFE_UNIX_SOCKET_PATH_LENGTH {
+        if length > SAFE_CONTROL_PATH_LENGTH {
             return Err(RuntimeError::ControlPathTooLong {
                 path,
                 length,
-                maximum: SAFE_UNIX_SOCKET_PATH_LENGTH,
+                maximum: SAFE_CONTROL_PATH_LENGTH,
             });
         }
         Ok(path)
@@ -166,8 +170,23 @@ fn resolve_runtime_path(
         }
         Ok(base.join(APPLICATION_DIRECTORY))
     } else {
-        Ok(temporary_directory.join(format!("{APPLICATION_DIRECTORY}-{uid}")))
+        let directory_name = format!("{APPLICATION_DIRECTORY}-{uid}");
+        let candidate = temporary_directory.join(&directory_name);
+        if control_path_length(&candidate) <= SAFE_CONTROL_PATH_LENGTH {
+            Ok(candidate)
+        } else {
+            Ok(Path::new(SHORT_TEMPORARY_DIRECTORY).join(directory_name))
+        }
     }
+}
+
+fn control_path_length(runtime_directory: &Path) -> usize {
+    let filename = format!("{CONTROL_PREFIX}{}", "0".repeat(CONTROL_HASH_BYTES * 2));
+    runtime_directory
+        .join(filename)
+        .as_os_str()
+        .as_bytes()
+        .len()
 }
 
 /// Runtime directory or ControlPath management failure.
@@ -292,7 +311,7 @@ mod tests {
     impl TestDirectory {
         fn new() -> Self {
             let unique = NEXT_TEST_DIRECTORY_ID.fetch_add(1, Ordering::Relaxed);
-            let path = std::env::temp_dir().join(format!("r{:x}{unique:x}", std::process::id()));
+            let path = Path::new("/tmp").join(format!("r{:x}{unique:x}", std::process::id()));
             fs::create_dir(&path).unwrap();
             Self(path)
         }
@@ -337,12 +356,31 @@ mod tests {
             xdg.join("portdeck")
         );
         assert_eq!(
-            resolve_runtime_path(None, parent.path(), 42).unwrap(),
-            parent.path().join("portdeck-42")
+            resolve_runtime_path(None, Path::new("/tmp"), 42).unwrap(),
+            Path::new("/tmp/portdeck-42")
+        );
+        let long_temporary_directory = PathBuf::from(format!("/{}", "x".repeat(80)));
+        assert_eq!(
+            resolve_runtime_path(None, &long_temporary_directory, 42).unwrap(),
+            Path::new("/tmp/portdeck-42")
         );
         assert!(matches!(
             resolve_runtime_path(Some("relative".into()), parent.path(), 42),
             Err(RuntimeError::RelativeXdgRuntimeDirectory(_))
+        ));
+    }
+
+    #[test]
+    fn preserves_an_explicit_xdg_path_for_clear_length_validation() {
+        let base = PathBuf::from(format!("/{}", "x".repeat(80)));
+        let path = resolve_runtime_path(Some(base.clone().into_os_string()), Path::new("/tmp"), 42)
+            .unwrap();
+        assert_eq!(path, base.join("portdeck"));
+
+        let runtime = RuntimeDirectory { path };
+        assert!(matches!(
+            runtime.control_path(&TargetId::new("dev")),
+            Err(RuntimeError::ControlPathTooLong { .. })
         ));
     }
 
@@ -427,14 +465,23 @@ mod tests {
     }
 
     #[test]
-    fn reports_a_base_path_that_is_too_long_for_unix_sockets() {
-        let parent = TestDirectory::new();
-        let path = parent.child(&"x".repeat(80));
-        let runtime = RuntimeDirectory::prepare(path).unwrap();
+    fn reserves_the_openssh_temporary_suffix_at_the_control_path_boundary() {
+        let at_limit = RuntimeDirectory {
+            path: PathBuf::from(format!("/{}", "x".repeat(46))),
+        };
+        let accepted = at_limit.control_path(&TargetId::new("dev")).unwrap();
+        assert_eq!(accepted.as_os_str().as_bytes().len(), 83);
 
+        let over_limit = RuntimeDirectory {
+            path: PathBuf::from(format!("/{}", "x".repeat(47))),
+        };
         assert!(matches!(
-            runtime.control_path(&TargetId::new("dev")),
-            Err(RuntimeError::ControlPathTooLong { .. })
+            over_limit.control_path(&TargetId::new("dev")),
+            Err(RuntimeError::ControlPathTooLong {
+                length: 84,
+                maximum: 83,
+                ..
+            })
         ));
     }
 

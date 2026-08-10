@@ -1615,7 +1615,7 @@ mod tests {
         fn with_aliases(aliases: &[&str]) -> Self {
             let unique = NEXT_TEST_RUNTIME_ID.fetch_add(1, Ordering::Relaxed);
             let runtime_path =
-                std::env::temp_dir().join(format!("t{:x}{unique:x}", std::process::id()));
+                Path::new("/tmp").join(format!("t{:x}{unique:x}", std::process::id()));
             let runtime = RuntimeDirectory::prepare(&runtime_path).unwrap();
             let targets = aliases
                 .iter()

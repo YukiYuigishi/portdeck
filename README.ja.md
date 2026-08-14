@@ -26,8 +26,10 @@ MVPはLinux上のOpenSSH 9.6p1と、macOS 26.5 arm64上のシステムOpenSSH 10
 
 ## インストール
 
+repositoryを手動でcloneせず、公開Git repositoryから直接インストールできます。
+
 ```console
-cargo install --path .
+cargo install --git https://github.com/YukiYuigishi/portdeck.git --locked
 ```
 
 OpenSSHを利用できるか確認してから起動します。
@@ -35,6 +37,12 @@ OpenSSHを利用できるか確認してから起動します。
 ```console
 portdeck --diagnose
 portdeck
+```
+
+すでにsource checkoutがある場合は、そのlocal revisionをインストールすることもできます。
+
+```console
+cargo install --path . --locked
 ```
 
 `--help`と`--version`も利用できます。障害調査時は`portdeck --debug`で所有者限定のログを保存できます。

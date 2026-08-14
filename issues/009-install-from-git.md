@@ -1,8 +1,9 @@
 # Support installation from the public Git repository
 
-- Status: In Progress
+- Status: Resolved
 - Priority: High
 - Reported date: 2026-08-14
+- Resolved date: 2026-08-14
 - Component: `installation`, `documentation`, `ci`, `packaging`
 
 ## Summary
@@ -71,23 +72,23 @@ supported platform、OpenSSHとのsecurity boundaryを変更するものでは�
 
 ## Acceptance criteria
 
-- [ ] 公開repositoryから
+- [x] 公開repositoryから
   `cargo install --git https://github.com/YukiYuigishi/portdeck.git --locked`で
   portdeckをclone操作なしにinstallできる。
-- [ ] `README.md`と`README.ja.md`が上記Git install commandを明示し、install後の
+- [x] `README.md`と`README.ja.md`が上記Git install commandを明示し、install後の
   `portdeck --diagnose`と起動手順へつながっている。
-- [ ] 両READMEが既存checkout向けの`cargo install --path . --locked`も明確に区別して
+- [x] 両READMEが既存checkout向けの`cargo install --path . --locked`も明確に区別して
   案内している。
-- [ ] Git source installに必要なmanifestとlockfileが揃い、package metadataの変更は
+- [x] Git source installに必要なmanifestとlockfileが揃い、package metadataの変更は
   repositoryから確認できる事実だけで構成され、licenseを新規に宣言していない。
-- [ ] CIが検証対象revisionをGit sourceとしてisolated temporary install rootへ
+- [x] CIが検証対象revisionをGit sourceとしてisolated temporary install rootへ
   `--locked`でinstallし、installされたbinaryから`--version`と`--diagnose`を実行する。
-- [ ] CI smoke testはtemporary `HOME`とXDG/runtime pathsを使用し、利用者のSSH asset、
+- [x] CI smoke testはtemporary `HOME`とXDG/runtime pathsを使用し、利用者のSSH asset、
   secret、既存ControlMasterへ依存または接触しない。
-- [ ] install failure、lockfile不整合、binaryの実行失敗がCI failureとして検出される。
-- [ ] application behavior、OpenSSH delegation、supported environment、SPEC、PLAN、ADRに
+- [x] install failure、lockfile不整合、binaryの実行失敗がCI failureとして検出される。
+- [x] application behavior、OpenSSH delegation、supported environment、SPEC、PLAN、ADRに
   不要な変更がない。
-- [ ] required lint、test、Markdown link検査、`git diff --check`が成功する。
+- [x] required lint、test、Markdown link検査、`git diff --check`が成功する。
 
 ## Verification plan
 
@@ -111,4 +112,51 @@ supported platform、OpenSSHとのsecurity boundaryを変更するものでは�
 
 ## Resolution
 
-In progress.
+2026-08-14にGit sourceからのinstall手順と継続検証を整備した。
+
+### Changes
+
+- `README.md`と`README.ja.md`で
+  `cargo install --git https://github.com/YukiYuigishi/portdeck.git --locked`を
+  clone-freeな標準手順とし、既存checkout向けの
+  `cargo install --path . --locked`を別の選択肢として維持した。
+- `scripts/install-smoke.sh`を追加し、検証対象commitをlocal `file://` Git sourceから
+  temporary `CARGO_HOME`とinstall rootへinstallするようにした。installed binaryの
+  `--version`と`--diagnose`はtemporary `HOME`／XDG pathsと、`-V`だけを受け付ける
+  fake `ssh`で実行するため、利用者のSSH assetや既存ControlMasterへ接触しない。
+- GitHub Actionsのquality jobへsmoke scriptを追加し、install、lockfile、binary実行の
+  退行をpushとpull requestで検出するようにした。
+- `cargo metadata --no-deps --format-version 1`でmanifestを監査した。既存のpackage
+  name `portdeck`、version `0.1.0`、`src/main.rs`のbinary target、committedな
+  `Cargo.lock`でGit installに必要な情報は揃っていたため、`Cargo.toml`は変更せず、
+  licenseも新規に宣言しなかった。
+
+### Verification results
+
+- `./scripts/lint.sh`: 成功。
+- `cargo test --all-targets --all-features`: 成功。unit 109件、CLI 4件、DEBUG logging
+  4件、SSH adapter 7件が成功し、real OpenSSH integration 4件は既定どおりignoredだった。
+- relative Markdown link検査: 成功。ADR templateの意図的なplaceholderは除外した。
+- `git diff --check`、`sh -n scripts/install-smoke.sh`、
+  `cargo metadata --no-deps --format-version 1`: 成功。
+- localのnetworkを使う空`CARGO_HOME` smoke初回は、crates.ioの`de/ra/deranged`取得が
+  curl code 28のlow-speed timeoutで失敗した。retryはcrates.io index更新で約6分間
+  進まなかったため中止した。registry cacheをseedした別のonline試行も
+  `co/ns/const-oid`取得で同じcurl code 28となった。これらをinstall成功とは扱っていない。
+- networkに依存しない代替検証では、`cargo vendor --locked --offline`で既存cacheから
+  temporary vendor treeを作り、空のtemporary `CARGO_HOME`からlocal `file://` Git
+  sourceのcommit `910de24`を`--rev`、`--locked`、command-line source replacement付きで
+  installした。release buildとinstallに成功し、installed binaryは
+  `portdeck 0.1.0`と`OpenSSH_9.6p1 vendored-install-smoke`を出力した。repository fileは
+  変更せず、temporary resourceは終了時に削除した。
+- authoritativeな[GitHub Actions run 31767195589](https://github.com/YukiYuigishi/portdeck/actions/runs/31767195589)では、
+  `Run linters`、`Run tests`、`Smoke test Git installation`を含むjob全体が成功した。
+  clean-network runner上でcommitted scriptそのものによるisolated Git installとinstalled
+  binaryの実行が成功したため、local network failureから残っていたriskを解消した。
+- application behaviorとOpenSSH argvを変更しておらず、smoke testもfake `ssh -V`だけを
+  実行するため、real OpenSSH integration testは明示実行しなかった。
+
+### Related commits
+
+- `fe579f4 docs(issue): plan Git repository installation`
+- `910de24 ci: verify installation from Git source`

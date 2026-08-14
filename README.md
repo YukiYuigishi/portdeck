@@ -36,10 +36,24 @@ been established. Native Windows is not currently supported.
 
 ## Install and run
 
+Install directly from the public Git repository without cloning it first:
+
 ```console
-cargo install --path .
+cargo install --git https://github.com/YukiYuigishi/portdeck.git --locked
+```
+
+Then verify the OpenSSH client selected from `PATH` and start portdeck:
+
+```console
 portdeck --diagnose
 portdeck
+```
+
+If you already have a source checkout, you can install that local revision
+instead:
+
+```console
+cargo install --path . --locked
 ```
 
 `--diagnose` prints the OpenSSH version selected from `PATH`. `--help`,
